@@ -88,6 +88,34 @@ final class AppState: ObservableObject {
         return h > 0 ? "\(h)h \(m)m" : "\(m)m"
     }
 
+    /// Re-run transcription on an existing meeting folder. Overwrites
+    /// `transcript.{json,md,srt}` in place — any inline segment edits made
+    /// in the Transcript Viewer are lost, so callers should confirm with
+    /// the user first. Reuses the same `TranscriptionSession` as the
+    /// post-recording flow, so progress shows in the menu-bar popover.
+    func retranscribe(_ meeting: MeetingRecord) async {
+        // Don't stomp on an already-running transcription (e.g. just
+        // finished a recording). The button should be disabled in this
+        // state, but the guard is cheap insurance.
+        if case .running = transcribe.state { return }
+
+        await transcribe.run(
+            meetingFolder: meeting.folder,
+            expectedSpeakers: AppPreferences.shared.expectedSpeakerCount.pyannoteValue
+        )
+        library.rescan()
+
+        if case .done = transcribe.state,
+           let record = library.meetings.first(where: { $0.folder == meeting.folder }) {
+            toast.showTranscriptReady(
+                meetingTitle: record.title,
+                durationText: formatDuration(record.duration),
+                speakerCount: record.speakerCount,
+                folder: meeting.folder
+            )
+        }
+    }
+
     /// Generate (or refresh) the AI summary for a meeting via the LLM
     /// provider. Pipes the meeting's transcript through Claude CLI,
     /// caches the result to summary.json, and re-publishes via

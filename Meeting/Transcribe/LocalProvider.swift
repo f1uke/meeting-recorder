@@ -41,7 +41,11 @@ actor LocalProvider: TranscriptionProvider {
         diarizerBox = nil
     }
 
-    func transcribe(audioURL: URL, options: TranscriptionOptions) async throws -> TranscriptResult {
+    func transcribe(
+        audioURL: URL,
+        options: TranscriptionOptions,
+        progress: (@Sendable (Double) -> Void)?
+    ) async throws -> TranscriptResult {
         guard FileManager.default.fileExists(atPath: audioURL.path(percentEncoded: false)) else {
             throw TranscriptionError.audioMissing(audioURL)
         }
@@ -49,23 +53,47 @@ actor LocalProvider: TranscriptionProvider {
         let path = audioURL.path(percentEncoded: false)
         let kit = try await loadKit()
 
+        // When diarization is enabled, Whisper is roughly the first ~80% of
+        // wall time on the output stream and SpeakerKit the last ~20%; on a
+        // mic-only pass Whisper is the whole 100%.
+        let whisperShare: Double = options.withDiarization ? 0.80 : 1.0
+
         // Always run Whisper for text + word timestamps.
+        let whisperReporter: (@Sendable (Double) -> Void)?
+        if let report = progress {
+            whisperReporter = { (fraction: Double) in
+                report(min(whisperShare, fraction * whisperShare))
+            }
+        } else {
+            whisperReporter = nil
+        }
         let chunks = try await Self.runTranscribe(
             box: kit,
             audioPath: path,
             language: options.language,
-            providerName: name
+            providerName: name,
+            onProgress: whisperReporter
         )
 
         if options.withDiarization {
             let dia = try await loadDiarizer()
+            let diarizeReporter: (@Sendable (Double) -> Void)?
+            if let report = progress {
+                diarizeReporter = { (fraction: Double) in
+                    report(min(1.0, whisperShare + fraction * (1.0 - whisperShare)))
+                }
+            } else {
+                diarizeReporter = nil
+            }
             let labeledGroups = try await Self.runDiarize(
                 box: dia,
                 audioPath: path,
                 whisperChunks: chunks,
                 expectedSpeakerCount: options.expectedSpeakerCount,
-                providerName: name
+                providerName: name,
+                onProgress: diarizeReporter
             )
+            progress?(1.0)
             return Self.mapDiarized(
                 groups: labeledGroups,
                 whisperChunks: chunks,
@@ -75,6 +103,7 @@ actor LocalProvider: TranscriptionProvider {
             )
         }
 
+        progress?(1.0)
         return Self.mapKnownSpeaker(
             chunks: chunks,
             options: options,
@@ -151,7 +180,8 @@ actor LocalProvider: TranscriptionProvider {
         box: KitBox,
         audioPath: String,
         language: String?,
-        providerName: String
+        providerName: String,
+        onProgress: (@Sendable (Double) -> Void)?
     ) async throws -> [TranscriptionResult] {
         let decode = DecodingOptions(
             verbose: false,
@@ -162,6 +192,29 @@ actor LocalProvider: TranscriptionProvider {
             wordTimestamps: true,
             chunkingStrategy: .vad
         )
+
+        // Snapshot Foundation Progress baseline. WhisperKit's `progress`
+        // monotonically grows across calls (`totalUnitCount = max(...)`)
+        // because the same Progress object is shared — without a baseline
+        // a second call would start at the previous fractionCompleted.
+        let baseCompleted = box.kit.progress.completedUnitCount
+        let baseTotal = box.kit.progress.totalUnitCount
+
+        let pollerTask: Task<Void, Never>? = onProgress.map { report in
+            Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    let p = box.kit.progress
+                    let completed = p.completedUnitCount - baseCompleted
+                    let total = p.totalUnitCount - baseTotal
+                    guard total > 0 else { continue }
+                    let f = max(0.0, min(1.0, Double(completed) / Double(total)))
+                    report(f)
+                }
+            }
+        }
+        defer { pollerTask?.cancel() }
+
         do {
             return try await box.kit.transcribe(audioPath: audioPath, decodeOptions: decode)
         } catch {
@@ -174,7 +227,8 @@ actor LocalProvider: TranscriptionProvider {
         audioPath: String,
         whisperChunks: [TranscriptionResult],
         expectedSpeakerCount: Int?,
-        providerName: String
+        providerName: String,
+        onProgress: (@Sendable (Double) -> Void)?
     ) async throws -> [[SpeakerSegment]] {
         do {
             // SpeakerKit needs 16 kHz mono float32 — reuse WhisperKit's loader
@@ -195,7 +249,17 @@ actor LocalProvider: TranscriptionProvider {
                 numberOfSpeakers: expectedSpeakerCount,
                 clusterDistanceThreshold: 0.7
             )
-            let result = try await box.kit.diarize(audioArray: audio, options: options)
+            let pyannoteCallback: (@Sendable (Progress) -> Void)?
+            if let report = onProgress {
+                pyannoteCallback = { (p: Progress) in report(p.fractionCompleted) }
+            } else {
+                pyannoteCallback = nil
+            }
+            let result = try await box.kit.diarize(
+                audioArray: audio,
+                options: options,
+                progressCallback: pyannoteCallback
+            )
             return result.addSpeakerInfo(
                 to: whisperChunks,
                 strategy: SpeakerInfoStrategy.subsegment

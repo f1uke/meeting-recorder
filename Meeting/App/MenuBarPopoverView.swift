@@ -28,8 +28,8 @@ struct MenuBarPopoverView: View {
                     )
                 case (.stopping, _):
                     PopoverTransientView(label: "หยุดบันทึก…")
-                case let (_, .running(stage)):
-                    PopoverTranscribingView(stage: stage)
+                case let (_, .running(stage, overall)):
+                    PopoverTranscribingView(stage: stage, overall: overall)
                 case let (_, .done(url)):
                     PopoverDoneView(transcriptURL: url) { transcribe.dismiss() }
                 case let (_, .failed(message)):

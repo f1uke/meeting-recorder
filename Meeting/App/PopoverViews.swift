@@ -211,6 +211,10 @@ struct PopoverTransientView: View {
 
 struct PopoverTranscribingView: View {
     let stage: TranscriptionSession.Stage
+    /// Pre-weighted overall pipeline progress in 0...1, fed by
+    /// `TranscriptionSession`. Animated so the bar slides smoothly between
+    /// poll ticks rather than stepping.
+    let overall: Double
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -240,7 +244,8 @@ struct PopoverTranscribingView: View {
                                     colors: [Color.brandAccent, Color.brandAccent.opacity(0.7)],
                                     startPoint: .leading, endPoint: .trailing
                                 ))
-                                .frame(width: proxy.size.width * progressFraction)
+                                .frame(width: proxy.size.width * clampedOverall)
+                                .animation(.easeOut(duration: 0.25), value: clampedOverall)
                         }
                     }
                     .frame(height: 6)
@@ -262,14 +267,12 @@ struct PopoverTranscribingView: View {
         }
     }
 
-    private var progressFraction: Double {
-        let order = TranscriptionSession.Stage.pipeline
-        guard let idx = order.firstIndex(of: stage) else { return 0 }
-        return Double(idx + 1) / Double(order.count)
+    private var clampedOverall: Double {
+        max(0, min(1, overall))
     }
 
     private var percentText: String {
-        "\(Int(progressFraction * 100))%"
+        "\(Int((clampedOverall * 100).rounded()))%"
     }
 
     private var stageDisplayLabel: String {

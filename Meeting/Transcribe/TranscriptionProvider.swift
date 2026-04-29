@@ -98,7 +98,16 @@ struct TranscriptionOptions: Sendable {
 protocol TranscriptionProvider: Sendable {
     /// Display name for Settings + transcript metadata.
     var name: String { get }
-    func transcribe(audioURL: URL, options: TranscriptionOptions) async throws -> TranscriptResult
+    /// Transcribe one audio file. `progress` (when non-nil) is called with a
+    /// fraction in 0...1 representing this single call's progress through the
+    /// audio — including diarization when `options.withDiarization` is set.
+    /// Reporting is best-effort and may emit nothing if the underlying model
+    /// doesn't expose progress.
+    func transcribe(
+        audioURL: URL,
+        options: TranscriptionOptions,
+        progress: (@Sendable (Double) -> Void)?
+    ) async throws -> TranscriptResult
     /// Release any loaded model weights from memory. Called by the session
     /// after a transcript completes so the multi-GB CoreML buffers don't sit
     /// resident for the rest of the app's lifetime.
@@ -107,6 +116,9 @@ protocol TranscriptionProvider: Sendable {
 
 extension TranscriptionProvider {
     func unloadModels() async {}
+    func transcribe(audioURL: URL, options: TranscriptionOptions) async throws -> TranscriptResult {
+        try await transcribe(audioURL: audioURL, options: options, progress: nil)
+    }
 }
 
 enum TranscriptionError: LocalizedError {

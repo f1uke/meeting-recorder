@@ -521,12 +521,30 @@ private struct DetailToolbar: View {
     let meeting: MeetingRecord
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var library: MeetingsLibrary
+    @EnvironmentObject private var transcribe: TranscriptionSession
     @Environment(\.openWindow) private var openWindow
     @AppStorage("dev.fluke.meeting.summaryDisclosureSeen") private var disclosureSeen = false
     @State private var showDisclosure = false
+    @State private var showRetranscribeConfirm = false
 
     private var summaryEnabled: Bool {
         meeting.hasTranscript && appState.llmAvailability == .available
+    }
+
+    private var hasAudio: Bool {
+        let fm = FileManager.default
+        let mic = meeting.folder.appendingPathComponent("mic.m4a")
+        let out = meeting.folder.appendingPathComponent("output.m4a")
+        return fm.fileExists(atPath: mic.path) && fm.fileExists(atPath: out.path)
+    }
+
+    private var isTranscribing: Bool {
+        if case .running = transcribe.state { return true }
+        return false
+    }
+
+    private var retranscribeEnabled: Bool {
+        hasAudio && !isTranscribing
     }
 
     private func generateOrRegenerate() async {
@@ -544,6 +562,27 @@ private struct DetailToolbar: View {
                 appState.route = .transcript
             }
             .disabled(!meeting.hasTranscript)
+
+            ToolbarButton(
+                icon: "arrow.clockwise",
+                label: meeting.hasTranscript ? "Re-transcribe" : "Transcribe"
+            ) {
+                if meeting.hasTranscript {
+                    showRetranscribeConfirm = true
+                } else {
+                    Task { await appState.retranscribe(meeting) }
+                }
+            }
+            .disabled(!retranscribeEnabled)
+            .help(
+                hasAudio
+                    ? (isTranscribing
+                        ? "Already transcribing"
+                        : (meeting.hasTranscript
+                            ? "Re-run WhisperKit + SpeakerKit on this meeting"
+                            : "Run WhisperKit + SpeakerKit on this meeting"))
+                    : "Audio files (mic.m4a / output.m4a) not found in folder"
+            )
 
             ToolbarButton(icon: "sparkles", label: "Summary") {
                 Task { await generateOrRegenerate() }
@@ -583,6 +622,14 @@ private struct DetailToolbar: View {
             }
         } message: {
             Text("AI summary uses your Claude Code installation to generate a summary and action items. The transcript will be sent to Claude. This is the only step that ever leaves your Mac — recording and transcription stay local.")
+        }
+        .alert("Re-transcribe meeting?", isPresented: $showRetranscribeConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Re-transcribe", role: .destructive) {
+                Task { await appState.retranscribe(meeting) }
+            }
+        } message: {
+            Text("This overwrites transcript.json, transcript.md, and transcript.srt. Any inline segment edits in the Transcript Viewer will be lost. The cached AI summary will become out of date — regenerate it after.")
         }
     }
 
