@@ -24,4 +24,16 @@ final class AppState: ObservableObject {
         await PermissionManager.request(permission)
         await refreshPermissions()
     }
+
+    /// Stop the active recording and immediately kick off transcription on
+    /// the resulting folder. Used by both the popover and the expanded
+    /// Recording window so the post-stop flow stays consistent.
+    func stopAndTranscribe() async {
+        await recording.stop()
+        guard let folder = recording.lastFolder else { return }
+        await transcribe.run(
+            meetingFolder: folder,
+            expectedSpeakers: AppPreferences.shared.expectedSpeakerCount.pyannoteValue
+        )
+    }
 }

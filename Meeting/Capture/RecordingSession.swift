@@ -15,6 +15,11 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var lastFolder: URL?
     @Published private(set) var errorMessage: String?
+    /// Window title of the source being recorded (for headers like
+    /// "Q2 Roadmap Sync — Zoom"). Cleared when not recording.
+    @Published private(set) var currentSourceTitle: String?
+    /// Owning application name — paired with `currentSourceTitle`.
+    @Published private(set) var currentSourceApp: String?
 
     private var coordinator: ScreenCaptureCoordinator?
     private var micRecorder: MicRecorder?
@@ -97,6 +102,8 @@ final class RecordingSession: ObservableObject {
             return
         }
 
+        currentSourceTitle = window.title
+        currentSourceApp = app.applicationName
         state = .recording(folder: folder, started: Date())
     }
 
@@ -121,6 +128,8 @@ final class RecordingSession: ObservableObject {
 
         lastFolder = currentFolder
         currentFolder = nil
+        currentSourceTitle = nil
+        currentSourceApp = nil
         state = .idle
     }
 
