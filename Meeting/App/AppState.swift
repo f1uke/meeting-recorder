@@ -10,12 +10,14 @@ final class AppState: ObservableObject {
     let recording: RecordingSession
     let transcribe: TranscriptionSession
     let library: MeetingsLibrary
+    let toast: ToastPresenter
     @Published private(set) var permissions = PermissionStatus()
 
     init() {
         self.recording = RecordingSession()
         self.transcribe = TranscriptionSession(provider: LocalProvider())
         self.library = MeetingsLibrary()
+        self.toast = ToastPresenter()
     }
 
     func refreshPermissions() async {
@@ -42,5 +44,24 @@ final class AppState: ObservableObject {
         )
         // Re-read after transcript.json lands so duration / speakers fill in.
         library.rescan()
+
+        // Surface a "Transcript ready" toast on success so the user sees
+        // completion even if they've moved on to another app.
+        if case .done = transcribe.state, let record = library.meetings.first(where: { $0.folder == folder }) {
+            toast.showTranscriptReady(
+                meetingTitle: record.title,
+                durationText: formatDuration(record.duration),
+                speakerCount: record.speakerCount,
+                folder: folder
+            )
+        }
+    }
+
+    private func formatDuration(_ d: TimeInterval?) -> String {
+        guard let d else { return "" }
+        let total = Int(d)
+        let h = total / 3600
+        let m = (total / 60) % 60
+        return h > 0 ? "\(h)h \(m)m" : "\(m)m"
     }
 }

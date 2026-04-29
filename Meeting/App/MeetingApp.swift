@@ -36,17 +36,6 @@ struct MeetingApp: App {
             TranscriptViewerView()
                 .appEnvironment(appState)
         }
-
-        // Temporary debug surface — keeps the pre-redesign full-window UI
-        // available during the U2-U7 transition so we can exercise flows
-        // that don't fit cleanly in a 360pt popover yet. Removed in U8.
-        WindowGroup("Debug · Full UI", id: "debug") {
-            ContentView()
-                .appEnvironment(appState)
-                .frame(minWidth: 640, minHeight: 480)
-                .task { await appState.refreshPermissions() }
-        }
-        .windowResizability(.contentSize)
         .commands {
             AppCommands(recording: appState.recording) {
                 Task { await appState.stopAndTranscribe() }
