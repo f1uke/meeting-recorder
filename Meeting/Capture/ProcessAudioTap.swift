@@ -20,6 +20,11 @@ final class ProcessAudioTap: @unchecked Sendable {
     private var deviceProcID: AudioDeviceIOProcID?
     private var fileBox: AudioFileBox?
     private let queue = DispatchQueue(label: "dev.fluke.meeting.process-tap", qos: .userInitiated)
+    /// Number of audio process objects this tap is bridging — typically 1
+    /// for native apps and 2-4+ for Electron/Chromium apps with helpers.
+    /// Surfaced in the recording window's source sublabel so the user can
+    /// verify the multi-process tap is wired up correctly.
+    private(set) var processCount: Int = 0
 
     func start(targetPID: pid_t, targetBundleID: String?, url: URL, rmsBuffer: RMSRingBuffer? = nil) throws {
         // Electron / Chromium apps (Discord, Slack, VSCode...) produce audio
@@ -33,6 +38,7 @@ final class ProcessAudioTap: @unchecked Sendable {
         guard !processObjectIDs.isEmpty else {
             throw TapError.translatePID(targetPID, OSStatus(kAudioHardwareBadObjectError))
         }
+        self.processCount = processObjectIDs.count
         NSLog("[Meeting/Tap] start pid=%d bundle=%@ → tapping %d audio object(s): %@",
               targetPID,
               targetBundleID ?? "(none)",

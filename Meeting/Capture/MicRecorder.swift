@@ -7,6 +7,10 @@ import AVFoundation
 final class MicRecorder: @unchecked Sendable {
     private var engine: AVAudioEngine?
     private var file: AVAudioFile?
+    /// Human-readable name of the input device, if AVCaptureDevice can
+    /// resolve one — surfaced as "Built-in Microphone" in the recording
+    /// window's mic channel sublabel.
+    private(set) var deviceName: String?
 
     /// Push level samples into the caller-provided ring buffer so the UI
     /// can render a live waveform without owning the recorder.
@@ -14,6 +18,10 @@ final class MicRecorder: @unchecked Sendable {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
+
+        // Resolve the active input device's display name. AVCaptureDevice
+        // gives us the user-friendly label without poking at HAL directly.
+        self.deviceName = AVCaptureDevice.default(for: .audio)?.localizedName
 
         let fileSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,

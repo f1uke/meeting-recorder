@@ -23,6 +23,11 @@ final class RecordingSession: ObservableObject {
     /// User-flagged moments accumulated by ⌘B during the active recording.
     /// Cleared on `start`, persisted to `marks.json` on `stop`.
     @Published private(set) var marks: [Mark] = []
+    /// Mic device label for the recording window's "You · mic" sub-label.
+    @Published private(set) var micDeviceName: String?
+    /// Number of audio process objects bridged by the output tap. Surfaced
+    /// to confirm Electron multi-helper detection is wired up.
+    @Published private(set) var tapProcessCount: Int = 0
 
     /// Live mic-level ring buffer — the popover and recording window read
     /// from this each frame to draw the user's waveform. Survives recorder
@@ -91,6 +96,7 @@ final class RecordingSession: ObservableObject {
         do {
             try mic.start(url: micURL, rmsBuffer: micRMS)
             self.micRecorder = mic
+            self.micDeviceName = mic.deviceName
         } catch {
             try? await coord.stop()
             self.coordinator = nil
@@ -109,6 +115,7 @@ final class RecordingSession: ObservableObject {
                 rmsBuffer: outputRMS
             )
             self.processAudioTap = tap
+            self.tapProcessCount = tap.processCount
         } catch {
             mic.stop()
             self.micRecorder = nil
@@ -168,6 +175,8 @@ final class RecordingSession: ObservableObject {
         currentFolder = nil
         currentSourceTitle = nil
         currentSourceApp = nil
+        micDeviceName = nil
+        tapProcessCount = 0
         state = .idle
     }
 
