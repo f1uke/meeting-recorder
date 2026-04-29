@@ -21,7 +21,7 @@ final class ProcessAudioTap: @unchecked Sendable {
     private var fileBox: AudioFileBox?
     private let queue = DispatchQueue(label: "dev.fluke.meeting.process-tap", qos: .userInitiated)
 
-    func start(targetPID: pid_t, targetBundleID: String?, url: URL) throws {
+    func start(targetPID: pid_t, targetBundleID: String?, url: URL, rmsBuffer: RMSRingBuffer? = nil) throws {
         // Electron / Chromium apps (Discord, Slack, VSCode...) produce audio
         // in helper processes whose PID differs from the main window's PID.
         // We tap every audio process whose bundleID shares a prefix with the
@@ -102,7 +102,7 @@ final class ProcessAudioTap: @unchecked Sendable {
             commonFormat: format.commonFormat,
             interleaved: format.isInterleaved
         )
-        let box = AudioFileBox(file: file, format: format)
+        let box = AudioFileBox(file: file, format: format, rmsBuffer: rmsBuffer)
         fileBox = box
 
         var procID: AudioDeviceIOProcID?
@@ -283,13 +283,15 @@ final class ProcessAudioTap: @unchecked Sendable {
 private final class AudioFileBox: @unchecked Sendable {
     let file: AVAudioFile
     let format: AVAudioFormat
+    let rmsBuffer: RMSRingBuffer?
     private let bytesPerChannelFrame: Int
     private var loggedFirst = false
     private var totalFrames: UInt64 = 0
 
-    init(file: AVAudioFile, format: AVAudioFormat) {
+    init(file: AVAudioFile, format: AVAudioFormat, rmsBuffer: RMSRingBuffer? = nil) {
         self.file = file
         self.format = format
+        self.rmsBuffer = rmsBuffer
         // Non-interleaved: bufferList has N buffers, each with 1 channel
         //   → bytes per channel-frame = mBytesPerFrame (already per-channel for non-interleaved ASBD)
         // Interleaved: bufferList has 1 buffer with all channels packed
@@ -340,6 +342,10 @@ private final class AudioFileBox: @unchecked Sendable {
             totalFrames += UInt64(frameCount)
         } catch {
             NSLog("[Meeting/Tap] write error: %@", String(describing: error))
+        }
+
+        if let rmsBuffer {
+            rmsBuffer.push(RMSRingBuffer.computeNormalized(buffer: pcmBuffer))
         }
     }
 

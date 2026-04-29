@@ -20,6 +20,16 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var currentSourceTitle: String?
     /// Owning application name — paired with `currentSourceTitle`.
     @Published private(set) var currentSourceApp: String?
+    /// User-flagged moments accumulated by ⌘B during the active recording.
+    /// Cleared on `start`, persisted to `marks.json` on `stop`.
+    @Published private(set) var marks: [Mark] = []
+
+    /// Live mic-level ring buffer — the popover and recording window read
+    /// from this each frame to draw the user's waveform. Survives recorder
+    /// restart by being owned at the session level.
+    let micRMS = RMSRingBuffer(capacity: 96)
+    /// Live meeting-output level ring buffer.
+    let outputRMS = RMSRingBuffer(capacity: 96)
 
     private var coordinator: ScreenCaptureCoordinator?
     private var micRecorder: MicRecorder?
@@ -35,6 +45,9 @@ final class RecordingSession: ObservableObject {
         guard state == .idle else { return }
         state = .starting
         errorMessage = nil
+        marks = []
+        micRMS.reset()
+        outputRMS.reset()
 
         let folder: URL
         do {
@@ -76,7 +89,7 @@ final class RecordingSession: ObservableObject {
 
         let mic = MicRecorder()
         do {
-            try mic.start(url: micURL)
+            try mic.start(url: micURL, rmsBuffer: micRMS)
             self.micRecorder = mic
         } catch {
             try? await coord.stop()
@@ -89,7 +102,12 @@ final class RecordingSession: ObservableObject {
 
         let tap = ProcessAudioTap()
         do {
-            try tap.start(targetPID: targetPID, targetBundleID: app.bundleIdentifier, url: outputURL)
+            try tap.start(
+                targetPID: targetPID,
+                targetBundleID: app.bundleIdentifier,
+                url: outputURL,
+                rmsBuffer: outputRMS
+            )
             self.processAudioTap = tap
         } catch {
             mic.stop()
@@ -105,6 +123,14 @@ final class RecordingSession: ObservableObject {
         currentSourceTitle = window.title
         currentSourceApp = app.applicationName
         state = .recording(folder: folder, started: Date())
+    }
+
+    /// Append a mark at the current elapsed time. Triggered by ⌘B or the
+    /// "+ Mark" button. No-op if not recording.
+    func mark() {
+        guard case let .recording(_, started) = state else { return }
+        let elapsed = Date().timeIntervalSince(started)
+        marks.append(Mark(timestamp: elapsed))
     }
 
     func stop() async {
@@ -125,6 +151,18 @@ final class RecordingSession: ObservableObject {
             errorMessage = "หยุด ScreenCapture ผิดพลาด: \(error.localizedDescription)"
         }
         coordinator = nil
+
+        // Persist marks before the folder reference is cleared so the
+        // file lands beside the media. Always written (even if empty) so
+        // the upcoming MeetingsLibrary watcher has a known artifact.
+        if let folder = currentFolder {
+            do {
+                try MarksFile(marks: marks).write(to: folder)
+            } catch {
+                NSLog("[Meeting/Session] marks.json write failed: %@",
+                      String(describing: error))
+            }
+        }
 
         lastFolder = currentFolder
         currentFolder = nil

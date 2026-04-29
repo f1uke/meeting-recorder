@@ -8,7 +8,9 @@ final class MicRecorder: @unchecked Sendable {
     private var engine: AVAudioEngine?
     private var file: AVAudioFile?
 
-    func start(url: URL) throws {
+    /// Push level samples into the caller-provided ring buffer so the UI
+    /// can render a live waveform without owning the recorder.
+    func start(url: URL, rmsBuffer: RMSRingBuffer? = nil) throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
@@ -32,11 +34,15 @@ final class MicRecorder: @unchecked Sendable {
         )
 
         let box = AudioFileBox(file: file)
+        let levels = rmsBuffer
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable buffer, _ in
             do {
                 try box.file.write(from: buffer)
             } catch {
                 NSLog("[Meeting] mic write error: %@", String(describing: error))
+            }
+            if let levels {
+                levels.push(RMSRingBuffer.computeNormalized(buffer: buffer))
             }
         }
 

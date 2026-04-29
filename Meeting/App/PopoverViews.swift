@@ -118,11 +118,24 @@ struct PopoverRecordingView: View {
                     .truncationMode(.middle)
             }
 
-            // Live waveform — stub levels during U3, real RMS in U4.
             VStack(spacing: 6) {
-                StubChannelMeter(label: "You · mic", color: .brandAccent)
-                StubChannelMeter(label: "Meeting", color: .warmMark)
+                LiveChannelMeter(
+                    label: "You · mic",
+                    color: .brandAccent,
+                    buffer: recording.micRMS
+                )
+                LiveChannelMeter(
+                    label: "Meeting",
+                    color: .warmMark,
+                    buffer: recording.outputRMS
+                )
             }
+
+            BookmarksChip(
+                count: recording.marks.count,
+                lastTimestamp: recording.marks.last?.timestamp,
+                onMark: { recording.mark() }
+            )
 
             HStack(spacing: 8) {
                 GlassIconButton(
@@ -138,6 +151,7 @@ struct PopoverRecordingView: View {
                         Text("⌘.").font(.mono(10)).opacity(0.7)
                     }
                 }
+                .keyboardShortcut(".", modifiers: .command)
             }
         }
     }
@@ -534,17 +548,21 @@ struct RecentSection: View {
 }
 
 // =============================================================================
-// MARK: - Stub waveform (animated until U4 wires real RMS)
+// MARK: - Live waveform (driven by RMSRingBuffer)
 // =============================================================================
 
-struct StubChannelMeter: View {
+struct LiveChannelMeter: View {
     let label: String
     let color: Color
-    private let barCount = 24
+    let buffer: RMSRingBuffer
+    /// Number of bars to render. Popover uses 24, recording window uses 96.
+    var barCount: Int = 24
+    /// Visual refresh rate. ~15 Hz feels smooth without melting CPU.
+    var refreshHz: Double = 15
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.08)) { context in
-            let levels = generatedLevels(for: context.date)
+        TimelineView(.periodic(from: .now, by: 1.0 / refreshHz)) { _ in
+            let levels = buffer.snapshot(last: barCount)
             HStack(spacing: 8) {
                 Text(label)
                     .font(.system(size: 10, weight: .semibold))
@@ -560,7 +578,7 @@ struct StubChannelMeter: View {
                             .fill(Color.black.opacity(0.04))
                     }
 
-                Text(meterText(levels: levels))
+                Text(peakText)
                     .font(.mono(9))
                     .foregroundStyle(Color.textFaint)
                     .frame(width: 32, alignment: .trailing)
@@ -568,21 +586,72 @@ struct StubChannelMeter: View {
         }
     }
 
-    private func generatedLevels(for date: Date) -> [Float] {
-        // Deterministic-looking jitter so bars feel alive without per-tick
-        // state mutation. Real RMS replaces this in U4.
-        let seed = date.timeIntervalSinceReferenceDate
-        return (0..<barCount).map { i in
-            let phase = Double(i) * 0.6 + seed * 8
-            let noise = sin(phase) * 0.35 + sin(phase * 0.4) * 0.25 + 0.55
-            return Float(min(max(noise, 0.08), 0.95))
+    private var peakText: String {
+        String(format: "%.0fdB", buffer.peakDB())
+    }
+}
+
+// =============================================================================
+// MARK: - Bookmarks chip
+// =============================================================================
+
+struct BookmarksChip: View {
+    let count: Int
+    let lastTimestamp: TimeInterval?
+    let onMark: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "flag.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.warmMark)
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.textDim)
+                .lineLimit(1)
+            Spacer()
+            Button(action: onMark) {
+                HStack(spacing: 4) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("Mark")
+                    Text("⌘B").font(.mono(9)).opacity(0.6)
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.brandAccent)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("b", modifiers: .command)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
+                }
         }
     }
 
-    private func meterText(levels: [Float]) -> String {
-        let peak = levels.max() ?? 0
-        let db = 20 * log10(Double(max(peak, 0.001)))
-        return String(format: "%.0fdB", db)
+    private var label: String {
+        switch (count, lastTimestamp) {
+        case (0, _): return "Mark moments as you go"
+        case (1, let t?): return "1 moment marked · last at \(formatTimestamp(t))"
+        case (let n, let t?): return "\(n) moments marked · last at \(formatTimestamp(t))"
+        case (let n, nil): return "\(n) moment\(n == 1 ? "" : "s") marked"
+        }
+    }
+
+    private func formatTimestamp(_ t: TimeInterval) -> String {
+        let total = Int(t)
+        let h = total / 3600
+        let m = (total / 60) % 60
+        let s = total % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%d:%02d", m, s)
     }
 }
 

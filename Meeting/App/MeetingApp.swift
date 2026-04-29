@@ -47,5 +47,10 @@ struct MeetingApp: App {
                 .task { await appState.refreshPermissions() }
         }
         .windowResizability(.contentSize)
+        .commands {
+            AppCommands(recording: appState.recording) {
+                Task { await appState.stopAndTranscribe() }
+            }
+        }
     }
 }
