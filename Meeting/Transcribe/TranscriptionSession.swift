@@ -60,6 +60,14 @@ final class TranscriptionSession: ObservableObject {
         let micURL = meetingFolder.appendingPathComponent("mic.wav")
         let outputURL = meetingFolder.appendingPathComponent("output.wav")
 
+        defer {
+            // Release WhisperKit + SpeakerKit so the multi-GB CoreML weights
+            // don't stay resident between recordings. Detached so we can
+            // return state to the UI without waiting on actor teardown.
+            let provider = self.provider
+            Task.detached { await provider.unloadModels() }
+        }
+
         do {
             state = .running(stage: .transcribingMic)
             let mic = try await provider.transcribe(

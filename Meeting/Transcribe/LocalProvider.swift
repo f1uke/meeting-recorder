@@ -32,6 +32,15 @@ actor LocalProvider: TranscriptionProvider {
         self.name = "WhisperKit (\(modelVariant)) + SpeakerKit"
     }
 
+    /// Drop the WhisperKit + SpeakerKit handles so ARC can release the
+    /// CoreML buffers (Whisper large-v3 alone is ~3GB resident). Safe to
+    /// call mid-flight: any in-progress transcribe holds its own strong
+    /// ref to the box for the duration of the call.
+    func unloadModels() {
+        kitBox = nil
+        diarizerBox = nil
+    }
+
     func transcribe(audioURL: URL, options: TranscriptionOptions) async throws -> TranscriptResult {
         guard FileManager.default.fileExists(atPath: audioURL.path(percentEncoded: false)) else {
             throw TranscriptionError.audioMissing(audioURL)

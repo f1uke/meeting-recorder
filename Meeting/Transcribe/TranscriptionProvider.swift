@@ -99,6 +99,14 @@ protocol TranscriptionProvider: Sendable {
     /// Display name for Settings + transcript metadata.
     var name: String { get }
     func transcribe(audioURL: URL, options: TranscriptionOptions) async throws -> TranscriptResult
+    /// Release any loaded model weights from memory. Called by the session
+    /// after a transcript completes so the multi-GB CoreML buffers don't sit
+    /// resident for the rest of the app's lifetime.
+    func unloadModels() async
+}
+
+extension TranscriptionProvider {
+    func unloadModels() async {}
 }
 
 enum TranscriptionError: LocalizedError {
