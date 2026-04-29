@@ -143,7 +143,7 @@ private struct TranscriptMainPane: View {
         .background(.regularMaterial)
         .task(id: meeting.id) { await loadTranscript() }
         .onAppear {
-            playerModel.load(videoURL: meeting.folder.appendingPathComponent("video.mov"))
+            playerModel.load(folder: meeting.folder)
         }
     }
 
@@ -861,24 +861,114 @@ private struct LoadingTranscriptPlaceholder: View {
 final class VideoPlayerModel: ObservableObject {
     @Published private(set) var player: AVPlayer?
     @Published private(set) var loadError: String?
-    private var loadedURL: URL?
+    private var loadedFolder: URL?
 
-    func load(videoURL: URL) {
-        guard videoURL != loadedURL else { return }
-        loadedURL = videoURL
-        if FileManager.default.fileExists(atPath: videoURL.path(percentEncoded: false)) {
-            player = AVPlayer(url: videoURL)
-            loadError = nil
-        } else {
+    /// Build a player that plays `video.mov` with `mic.wav` and
+    /// `output.wav` mixed in as parallel audio tracks. The recording
+    /// pipeline writes audio separately so diarization can isolate
+    /// participants — but the user expects to *hear* the meeting back,
+    /// so playback re-composites them.
+    func load(folder: URL) {
+        guard folder != loadedFolder else { return }
+        loadedFolder = folder
+
+        let videoURL = folder.appendingPathComponent("video.mov")
+        let micURL = folder.appendingPathComponent("mic.wav")
+        let outputURL = folder.appendingPathComponent("output.wav")
+
+        guard FileManager.default.fileExists(atPath: videoURL.path(percentEncoded: false)) else {
             player = nil
             loadError = "Missing"
+            return
         }
+
+        let micExists = FileManager.default.fileExists(atPath: micURL.path(percentEncoded: false))
+        let outputExists = FileManager.default.fileExists(atPath: outputURL.path(percentEncoded: false))
+
+        Task { @MainActor in
+            do {
+                let composition = try await Self.buildComposition(
+                    videoURL: videoURL,
+                    micURL: micExists ? micURL : nil,
+                    outputURL: outputExists ? outputURL : nil
+                )
+                let item = AVPlayerItem(asset: composition)
+                self.player = AVPlayer(playerItem: item)
+                self.loadError = nil
+            } catch {
+                NSLog("[Meeting/TranscriptViewer] composition build failed, falling back to video-only: %@",
+                      String(describing: error))
+                self.player = AVPlayer(url: videoURL)
+                self.loadError = nil
+            }
+        }
+    }
+
+    private nonisolated static func buildComposition(
+        videoURL: URL,
+        micURL: URL?,
+        outputURL: URL?
+    ) async throws -> AVMutableComposition {
+        // PreferPreciseDurationAndTiming forces Fig to pre-scan the file
+        // so seek tables are exact — without it FigFilePlayer can emit
+        // err=-12860 when seeking near track boundaries.
+        let assetOptions: [String: Any] = [
+            AVURLAssetPreferPreciseDurationAndTimingKey: true
+        ]
+
+        let composition = AVMutableComposition()
+        let videoAsset = AVURLAsset(url: videoURL, options: assetOptions)
+        let videoDuration = try await videoAsset.load(.duration)
+
+        if let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+           let compVideo = composition.addMutableTrack(
+               withMediaType: .video,
+               preferredTrackID: kCMPersistentTrackID_Invalid
+           ) {
+            try compVideo.insertTimeRange(
+                CMTimeRange(start: .zero, duration: videoDuration),
+                of: videoTrack, at: .zero
+            )
+        }
+
+        for url in [micURL, outputURL].compactMap({ $0 }) {
+            let asset = AVURLAsset(url: url, options: assetOptions)
+            guard let track = try await asset.loadTracks(withMediaType: .audio).first,
+                  let compTrack = composition.addMutableTrack(
+                      withMediaType: .audio,
+                      preferredTrackID: kCMPersistentTrackID_Invalid
+                  )
+            else { continue }
+            let audioDuration = try await asset.load(.duration)
+            let usable = CMTimeMinimum(audioDuration, videoDuration)
+            try compTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: usable),
+                of: track, at: .zero
+            )
+            // Pad any tail beyond the audio file with silence so the
+            // composition track spans the full video duration. Without
+            // this, seeking into the unpadded tail makes Fig walk past
+            // the end of the audio sample table and log err=-12860.
+            if usable < videoDuration {
+                compTrack.insertEmptyTimeRange(
+                    CMTimeRange(start: usable, duration: videoDuration - usable)
+                )
+            }
+        }
+
+        return composition
     }
 
     func seek(to seconds: TimeInterval) {
         guard let player else { return }
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        // Screen recordings have sparse keyframes (~2s apart at 30fps),
+        // so zero-tolerance seeks force the decoder to walk too far back
+        // and trigger FigFilePlayer err=-12860. Frame accuracy isn't
+        // needed for transcript navigation — quarter-second tolerance
+        // lands on the nearest keyframe and stays smooth.
+        let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance)
         player.play()
     }
 }
