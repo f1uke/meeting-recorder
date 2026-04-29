@@ -59,11 +59,6 @@ final class RecordingSession: ObservableObject {
         micRMS.reset()
         outputRMS.reset()
 
-        // Bring the app to front so any TCC re-prompt dialogs (e.g. when
-        // the build's code signature isn't yet trusted) are visible to
-        // the user instead of stuck behind the menu-bar popover.
-        NSApp.activate(ignoringOtherApps: true)
-
         // Watchdog: if any step hangs for 45s, force back to .idle with
         // an actionable errorMessage. The await in `coord.start` /
         // `engine.start()` / `AudioDeviceStart` can stall on TCC
@@ -100,6 +95,11 @@ final class RecordingSession: ObservableObject {
         let coord = ScreenCaptureCoordinator()
         do {
             try await coord.start(window: window, videoURL: videoURL)
+            guard state == .starting else {
+                try? await coord.stop()
+                NSLog("[Meeting/Session] start: cancelled during step 1 — rolled back")
+                return
+            }
             self.coordinator = coord
             NSLog("[Meeting/Session] start: step 1 done — SCStream live")
         } catch {
@@ -108,11 +108,22 @@ final class RecordingSession: ObservableObject {
             return
         }
 
-        // Step 2: mic via AVAudioEngine.
+        // Step 2: mic. `AVAudioEngine.start()` is synchronous and can
+        // block for hundreds of ms (longer on TCC/audio-unit init), so
+        // it runs off the main actor to keep the UI responsive.
         NSLog("[Meeting/Session] start: step 2 — AVAudioEngine input tap …")
         let mic = MicRecorder()
         do {
-            try mic.start(url: micURL, rmsBuffer: micRMS)
+            let micURLLocal = micURL
+            let micRMSLocal = micRMS
+            try await Task.detached(priority: .userInitiated) {
+                try mic.start(url: micURLLocal, rmsBuffer: micRMSLocal)
+            }.value
+            guard state == .starting else {
+                mic.stop()
+                NSLog("[Meeting/Session] start: cancelled during step 2 — rolled back")
+                return
+            }
             self.micRecorder = mic
             self.micDeviceName = mic.deviceName
             NSLog("[Meeting/Session] start: step 2 done — mic device=%@",
@@ -125,16 +136,30 @@ final class RecordingSession: ObservableObject {
             return
         }
 
-        // Step 3: per-process audio tap.
+        // Step 3: per-process audio tap. CoreAudio HAL setup
+        // (AudioHardwareCreateProcessTap / CreateAggregateDevice /
+        // AudioDeviceStart) is sync and the slowest leg — off-main for
+        // the same reason as step 2.
         NSLog("[Meeting/Session] start: step 3 — Core Audio Tap …")
         let tap = ProcessAudioTap()
         do {
-            try tap.start(
-                targetPID: targetPID,
-                targetBundleID: bundleID,
-                url: outputURL,
-                rmsBuffer: outputRMS
-            )
+            let outputURLLocal = outputURL
+            let outputRMSLocal = outputRMS
+            let bundleIDLocal = bundleID
+            let pidLocal = targetPID
+            try await Task.detached(priority: .userInitiated) {
+                try tap.start(
+                    targetPID: pidLocal,
+                    targetBundleID: bundleIDLocal,
+                    url: outputURLLocal,
+                    rmsBuffer: outputRMSLocal
+                )
+            }.value
+            guard state == .starting else {
+                tap.stop()
+                NSLog("[Meeting/Session] start: cancelled during step 3 — rolled back")
+                return
+            }
             self.processAudioTap = tap
             self.tapProcessCount = tap.processCount
             NSLog("[Meeting/Session] start: step 3 done — tap processCount=%d",

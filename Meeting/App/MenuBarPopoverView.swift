@@ -14,8 +14,6 @@ struct MenuBarPopoverView: View {
     var body: some View {
         Group {
             if !appState.permissions.allGranted {
-                // Permission gate. PermissionView is restyled in U8a; for now
-                // it's the existing layout shrunk into the popover frame.
                 PermissionView()
                     .padding(8)
             } else {
@@ -43,11 +41,5 @@ struct MenuBarPopoverView: View {
         }
         .frame(width: 360)
         .padding(14)
-        .background {
-            // The MenuBarExtra(.window) already provides a translucent
-            // popover backdrop on macOS; we lay our own subtle tint on top
-            // so the cards inside have something to blur against.
-            Color.clear
-        }
     }
 }

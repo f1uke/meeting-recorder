@@ -26,13 +26,9 @@ struct PopoverIdleView: View {
                 }
             )
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 SectionLabel(text: "Source")
-                WindowChip(
-                    window: picker.selectedWindow,
-                    icon: picker.selectedWindow.flatMap { picker.icon(for: $0) },
-                    onChange: { openWindow(id: "windowPicker") }
-                )
+                WindowPicker(model: picker)
             }
 
             SpeakerCountChip(selection: $prefs.expectedSpeakerCount)
@@ -414,88 +410,6 @@ struct PopoverHeader<Trailing: View>: View {
             Spacer(minLength: 8)
             trailing()
         }
-    }
-}
-
-// =============================================================================
-// MARK: - Window chip (Source picker)
-// =============================================================================
-
-struct WindowChip: View {
-    let window: SCWindow?
-    let icon: NSImage?
-    let onChange: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            iconView
-            VStack(alignment: .leading, spacing: 1) {
-                Text(primaryText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(secondaryText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.textDim)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 4)
-            Button(action: onChange) {
-                Text(window == nil ? "Pick" : "Change")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.brandAccent)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(10)
-        .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
-                }
-        }
-    }
-
-    @ViewBuilder
-    private var iconView: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(LinearGradient(
-                    colors: [Color.brandAccent, Color.brandAccentStrong],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                ))
-                .frame(width: 32, height: 32)
-            if let icon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 26, height: 26)
-            } else {
-                Image(systemName: "macwindow")
-                    .foregroundStyle(.white)
-            }
-        }
-        .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-    }
-
-    private var primaryText: String {
-        if let window {
-            let title = window.title?.trimmingCharacters(in: .whitespaces)
-            return (title?.isEmpty == false ? title! : "Untitled window")
-        }
-        return "Choose a window…"
-    }
-
-    private var secondaryText: String {
-        if let window {
-            return window.owningApplication?.applicationName ?? ""
-        }
-        return "Required to start recording"
     }
 }
 

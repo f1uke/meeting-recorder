@@ -92,65 +92,85 @@ fileprivate struct AppGroup {
     let windows: [SCWindow]
 }
 
+/// Compact inline window picker for use inside the menu-bar popover.
+///
+/// Does NOT use `List(selection:)` because that:
+///   1. Synchronously writes the selection binding mid-render, which
+///      triggers "Publishing changes from within view updates" with a
+///      `@Published` destination.
+///   2. Can dismiss `MenuBarExtra(.window)` popovers on row click in
+///      some macOS releases, since List rows in macOS sometimes call
+///      `becomeFirstResponder` paths that flip key window away from
+///      the non-activating popover panel.
+///
+/// Instead we render rows as plain `Button`s in a `ScrollView` — clicks
+/// stay inside the popover and selection updates are deferred via a
+/// regular @Published assignment.
 struct WindowPicker: View {
     @ObservedObject var model: WindowPickerModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Spacer()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
                 if model.isLoading {
                     ProgressView().controlSize(.small)
+                } else {
+                    Text("\(model.windows.count) windows")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.textFaint)
                 }
+                Spacer()
                 Button {
                     Task { await model.refresh() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.brandAccent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .help("Refresh window list")
             }
 
             if let error = model.loadError {
                 Text(error)
                     .foregroundStyle(.red)
-                    .font(.caption)
+                    .font(.system(size: 10))
             }
 
-            List(selection: deferredSelection) {
-                ForEach(groupedByApp(), id: \.appName) { group in
-                    Section(header: AppHeader(group: group, model: model)) {
+            ScrollView(showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(groupedByApp(), id: \.appName) { group in
+                        AppHeader(group: group, model: model)
+                            .padding(.top, 4)
                         ForEach(group.windows, id: \.windowID) { window in
-                            WindowRow(window: window)
-                                .tag(window.windowID as CGWindowID?)
+                            WindowRow(
+                                window: window,
+                                isSelected: model.selectedWindowID == window.windowID,
+                                onSelect: { model.selectedWindowID = window.windowID }
+                            )
                         }
                     }
                 }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
             }
-            .listStyle(.sidebar)
-            .frame(minHeight: 280)
+            .frame(height: 180)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.black.opacity(0.04))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
+                    }
+            }
         }
         .task {
             if model.windows.isEmpty {
                 await model.refresh()
             }
         }
-    }
-
-    // List on macOS writes the selection binding synchronously inside the
-    // click event, which lands in the middle of a view-update cycle and
-    // triggers SwiftUI's "Publishing changes from within view updates"
-    // warning when the destination is @Published. Defer the write one
-    // runloop tick to land outside the active update.
-    private var deferredSelection: Binding<CGWindowID?> {
-        Binding(
-            get: { model.selectedWindowID },
-            set: { newValue in
-                DispatchQueue.main.async {
-                    model.selectedWindowID = newValue
-                }
-            }
-        )
     }
 
     private func groupedByApp() -> [AppGroup] {
@@ -168,38 +188,61 @@ private struct AppHeader: View {
     let model: WindowPickerModel
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             if let first = group.windows.first, let icon = model.icon(for: first) {
                 Image(nsImage: icon)
                     .resizable()
-                    .frame(width: 18, height: 18)
+                    .interpolation(.high)
+                    .frame(width: 14, height: 14)
             }
             Text(group.appName)
-                .font(.headline)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.textPrimary)
             Text("(\(group.windows.count))")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 10))
+                .foregroundStyle(Color.textFaint)
+            Spacer()
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 6)
     }
 }
 
 private struct WindowRow: View {
     let window: SCWindow
+    let isSelected: Bool
+    let onSelect: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "macwindow")
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-            Text(window.title ?? "")
-                .lineLimit(1)
-            Spacer()
-            Text(dimensions)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+        Button(action: onSelect) {
+            HStack(spacing: 6) {
+                Spacer().frame(width: 18)
+                Text(window.title ?? "Untitled")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Text(dimensions)
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(Color.textFaint)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.brandAccent)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.brandAccent.opacity(0.14))
+                }
+            }
         }
-        .padding(.vertical, 1)
+        .buttonStyle(.plain)
     }
 
     private var dimensions: String {

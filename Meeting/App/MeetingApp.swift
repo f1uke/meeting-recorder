@@ -2,24 +2,26 @@ import SwiftUI
 
 @main
 struct MeetingApp: App {
-    @StateObject private var appState = AppState()
+    @StateObject private var appState: AppState
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    init() {
+        let state = AppState()
+        _appState = StateObject(wrappedValue: state)
+        // The adaptor instantiates AppDelegate eagerly, but
+        // applicationDidFinishLaunching hasn't run yet — so we hand the
+        // state off via a static reference for the delegate to pick up
+        // when it's ready to attach the popover content.
+        AppDelegate.pendingState = state
+    }
 
     var body: some Scene {
-        // Primary entry point — menu-bar icon. Click opens the popover.
-        MenuBarExtra {
-            MenuBarPopoverView()
-                .appEnvironment(appState)
-                .task { await appState.refreshPermissions() }
-        } label: {
-            MenuBarLabel(
-                recording: appState.recording,
-                transcribe: appState.transcribe
-            )
-        }
-        .menuBarExtraStyle(.window)
+        // No MenuBarExtra scene — AppDelegate owns the status item and
+        // popover via NSStatusItem + NSPopover. See AppDelegate.swift
+        // for why we can't use MenuBarExtra(.window) on macOS 26.
 
-        // Expanded surfaces — opened on demand from the popover via
-        // `OpenWindowAction`. Each one uses `.id` so we can target it
+        // Window scenes are openable on demand from the popover via
+        // `OpenWindowAction`. They use `id` so we can target each one
         // explicitly with `openWindow(id: "library")` etc.
         Window("Library", id: "library") {
             LibraryView()
@@ -28,14 +30,6 @@ struct MeetingApp: App {
 
         Window("Recording", id: "recording") {
             RecordingWindowView()
-                .appEnvironment(appState)
-        }
-        .windowResizability(.contentSize)
-
-        // Standalone window picker — replaces the .sheet that fought with
-        // the menu-bar popover's focus model on macOS.
-        Window("Pick a window to record", id: "windowPicker") {
-            WindowPickerWindowView()
                 .appEnvironment(appState)
         }
         .windowResizability(.contentSize)
