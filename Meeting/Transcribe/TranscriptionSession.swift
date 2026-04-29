@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// Drives transcription for one finished recording. Runs the provider on
-/// mic.wav (single speaker = "me") and output.wav (with diarization), merges
+/// mic.m4a (single speaker = "me") and output.m4a (with diarization), merges
 /// the two streams chronologically, and writes JSON / Markdown / SRT next to
 /// the audio in the meeting folder.
 @MainActor
@@ -50,15 +50,15 @@ final class TranscriptionSession: ObservableObject {
         }
     }
 
-    /// Run transcription on a finished meeting folder. Expects `mic.wav` and
-    /// `output.wav` to exist; produces `transcript.{json,md,srt}` alongside.
+    /// Run transcription on a finished meeting folder. Expects `mic.m4a` and
+    /// `output.m4a` to exist; produces `transcript.{json,md,srt}` alongside.
     /// `expectedSpeakers` overrides pyannote's auto-detection when set —
     /// pass `1` for solo recordings to suppress over-split.
     func run(meetingFolder: URL, expectedSpeakers: Int? = nil) async {
         state = .running(stage: .loadingModels)
 
-        let micURL = meetingFolder.appendingPathComponent("mic.wav")
-        let outputURL = meetingFolder.appendingPathComponent("output.wav")
+        let micURL = meetingFolder.appendingPathComponent("mic.m4a")
+        let outputURL = meetingFolder.appendingPathComponent("output.m4a")
 
         defer {
             // Release WhisperKit + SpeakerKit so the multi-GB CoreML weights

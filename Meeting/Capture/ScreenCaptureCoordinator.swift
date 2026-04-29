@@ -16,10 +16,13 @@ final class ScreenCaptureCoordinator: NSObject {
         let filter = SCContentFilter(desktopIndependentWindow: window)
 
         let config = SCStreamConfiguration()
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-        config.width = max(2, Int(window.frame.width * scale))
-        config.height = max(2, Int(window.frame.height * scale))
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        // Capture at logical pixel size (not retina × scale). For meeting
+        // playback the user reads transcripts, glances at the video for
+        // context — sub-retina is fine and it cuts encoded bytes by ~4×.
+        config.width = max(2, Int(window.frame.width))
+        config.height = max(2, Int(window.frame.height))
+        // 10 fps is enough for talking heads + slide changes; cuts another 3×.
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 10)
         config.queueDepth = 8
         config.capturesAudio = false       // system audio comes via Core Audio Tap (M3)
         config.captureMicrophone = false   // mic captured separately via MicRecorder
@@ -31,6 +34,8 @@ final class ScreenCaptureCoordinator: NSObject {
         let recConfig = SCRecordingOutputConfiguration()
         recConfig.outputURL = videoURL
         recConfig.outputFileType = .mov
+        // HEVC for ~30-40% smaller files at the same perceived quality.
+        recConfig.videoCodecType = .hevc
 
         let recOutput = SCRecordingOutput(configuration: recConfig, delegate: recordingOutputDelegate)
         try stream.addRecordingOutput(recOutput)

@@ -4,7 +4,7 @@ import AVFoundation
 import CoreAudio
 
 // Captures the audio output of a single process (e.g. Zoom, Meet, Safari)
-// into a WAV file by:
+// into an AAC m4a file by:
 //   1. Translating the target PID to a Core Audio process object
 //   2. Creating a stereo-mixdown CATap on that process
 //   3. Wrapping the tap in a private aggregate device
@@ -90,17 +90,15 @@ final class ProcessAudioTap: @unchecked Sendable {
         guard err == noErr else { throw TapError.aggregate(err) }
         aggregateDeviceID = aggID
 
-        // On-disk format = 16-bit interleaved PCM (valid WAV).
+        // On-disk format = AAC in MPEG-4 container (.m4a).
         // Processing format = whatever the tap delivers (typically non-interleaved float32).
-        // AVAudioFile converts buffer → file format automatically on write.
+        // AVAudioFile encodes buffer → AAC automatically on write.
         let fileSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: format.sampleRate,
             AVNumberOfChannelsKey: format.channelCount,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false,
+            AVEncoderBitRateKey: 96_000,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
         ]
         let file = try AVAudioFile(
             forWriting: url,
@@ -142,7 +140,8 @@ final class ProcessAudioTap: @unchecked Sendable {
         }
 
         // Drain any pending write blocks before closing the file so the
-        // WAV trailer is flushed against a fully-written body.
+        // m4a's moov atom is flushed against a fully-written body. If the
+        // process dies before fileBox is released, the file is unplayable.
         queue.sync {}
         fileBox = nil
     }

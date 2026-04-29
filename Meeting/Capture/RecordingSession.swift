@@ -77,8 +77,8 @@ final class RecordingSession: ObservableObject {
         currentFolder = folder
 
         let videoURL = folder.appendingPathComponent("video.mov")
-        let micURL = folder.appendingPathComponent("mic.wav")
-        let outputURL = folder.appendingPathComponent("output.wav")
+        let micURL = folder.appendingPathComponent("mic.m4a")
+        let outputURL = folder.appendingPathComponent("output.m4a")
 
         guard let app = window.owningApplication else {
             failStart("หน้าต่างที่เลือกไม่มี application owner")
@@ -250,8 +250,8 @@ final class RecordingSession: ObservableObject {
         guard case .recording = state else { return }
         state = .stopping
 
-        // Stop audio sources first so their WAV trailers flush before we
-        // tear down the recording session.
+        // Stop audio sources first so each m4a's moov atom is finalized
+        // before we tear down the recording session.
         micRecorder?.stop()
         micRecorder = nil
 

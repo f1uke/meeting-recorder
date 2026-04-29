@@ -864,8 +864,8 @@ final class VideoPlayerModel: ObservableObject {
     @Published private(set) var loadError: String?
     private var loadedFolder: URL?
 
-    /// Build a player that plays `video.mov` with `mic.wav` and
-    /// `output.wav` mixed in as parallel audio tracks. The recording
+    /// Build a player that plays `video.mov` with `mic.m4a` and
+    /// `output.m4a` mixed in as parallel audio tracks. The recording
     /// pipeline writes audio separately so diarization can isolate
     /// participants — but the user expects to *hear* the meeting back,
     /// so playback re-composites them.
@@ -874,8 +874,8 @@ final class VideoPlayerModel: ObservableObject {
         loadedFolder = folder
 
         let videoURL = folder.appendingPathComponent("video.mov")
-        let micURL = folder.appendingPathComponent("mic.wav")
-        let outputURL = folder.appendingPathComponent("output.wav")
+        let micURL = folder.appendingPathComponent("mic.m4a")
+        let outputURL = folder.appendingPathComponent("output.m4a")
 
         guard FileManager.default.fileExists(atPath: videoURL.path(percentEncoded: false)) else {
             player = nil

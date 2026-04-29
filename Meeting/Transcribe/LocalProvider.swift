@@ -4,8 +4,8 @@ import SpeakerKit
 
 // Local-first transcription provider. Loads Whisper + (optional) SpeakerKit
 // CoreML models once and runs:
-//   - mic.wav   →  WhisperKit + options.knownSpeaker = "me"
-//   - output.wav →  WhisperKit + SpeakerKit (pyannote v4) → speaker_0/1/...
+//   - mic.m4a   →  WhisperKit + options.knownSpeaker = "me"
+//   - output.m4a →  WhisperKit + SpeakerKit (pyannote v4) → speaker_0/1/...
 //
 // WhisperKit is a non-final open class so the compiler refuses to mark it
 // Sendable. Wrapping it in @unchecked Sendable boxes lets us cross actor

@@ -24,16 +24,16 @@ final class MicRecorder: @unchecked Sendable {
         self.deviceName = AVCaptureDevice.default(for: .audio)?.localizedName
 
         let fileSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: inputFormat.sampleRate,
             AVNumberOfChannelsKey: inputFormat.channelCount,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
+            AVEncoderBitRateKey: 64_000,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
         ]
 
-        // commonFormat = pcmFormatFloat32 matches the input tap buffer's format,
-        // so AVAudioFile converts to int16 PCM on disk for a valid WAV file.
+        // commonFormat = pcmFormatFloat32 matches the input tap buffer's
+        // format; AVAudioFile encodes to AAC on write. URL must end in .m4a
+        // so the system picks the MPEG-4 container.
         let file = try AVAudioFile(
             forWriting: url,
             settings: fileSettings,
@@ -63,7 +63,9 @@ final class MicRecorder: @unchecked Sendable {
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil
-        file = nil  // releases AVAudioFile so the WAV trailer flushes
+        // Releases AVAudioFile, which finalizes the m4a (writes the moov
+        // atom). If the process dies before this point, the file is unplayable.
+        file = nil
     }
 }
 
