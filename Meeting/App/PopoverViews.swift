@@ -508,6 +508,8 @@ struct SpeakerCountChip: View {
 // =============================================================================
 
 struct RecentSection: View {
+    @EnvironmentObject private var library: MeetingsLibrary
+    @Environment(\.openWindow) private var openWindow
     let openLibrary: () -> Void
 
     var body: some View {
@@ -527,15 +529,47 @@ struct RecentSection: View {
                 .buttonStyle(.plain)
             }
 
-            // Empty state — Library wiring lands in U5.
-            HStack(spacing: 8) {
-                Image(systemName: "tray")
-                    .foregroundStyle(Color.textFaint)
-                Text("No recent meetings yet")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.textFaint)
+            if library.recent.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "tray")
+                        .foregroundStyle(Color.textFaint)
+                    Text("No recent meetings yet")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textFaint)
+                }
+                .padding(.vertical, 6)
+            } else {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(library.recent) { meeting in
+                        Button {
+                            library.selection = meeting.id
+                            openWindow(id: "library")
+                        } label: {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(Color.brandAccent.opacity(0.7))
+                                    .frame(width: 6, height: 6)
+                                Text(meeting.title)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.textPrimary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                Text(durationText(meeting))
+                                    .font(.system(size: 11).monospacedDigit())
+                                    .foregroundStyle(Color.textDim)
+                                Text(relativeText(meeting))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.textFaint)
+                                    .frame(width: 64, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .contentShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
-            .padding(.vertical, 6)
         }
         .padding(.top, 4)
         .overlay(alignment: .top) {
@@ -544,6 +578,20 @@ struct RecentSection: View {
                 .frame(height: 0.5)
                 .offset(y: -8)
         }
+    }
+
+    private func durationText(_ m: MeetingRecord) -> String {
+        guard let d = m.duration else { return "—" }
+        let total = Int(d)
+        let h = total / 3600
+        let mm = (total / 60) % 60
+        return h > 0 ? "\(h)h\(mm)m" : "\(mm)m"
+    }
+
+    private func relativeText(_ m: MeetingRecord) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f.localizedString(for: m.recordedAt, relativeTo: Date())
     }
 }
 

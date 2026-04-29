@@ -4,7 +4,7 @@ import Foundation
 /// "+ Mark" button) and persisted alongside the meeting at
 /// `<meeting>/marks.json`. Notes are added later in the Transcript Viewer
 /// (U7); during recording marks are timestamps only.
-struct Mark: Codable, Identifiable, Equatable, Sendable {
+struct Mark: Codable, Identifiable, Equatable, Hashable, Sendable {
     let id: UUID
     /// Seconds elapsed since the recording started.
     let timestamp: TimeInterval

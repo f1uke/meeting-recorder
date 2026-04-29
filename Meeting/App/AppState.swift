@@ -9,11 +9,13 @@ import Combine
 final class AppState: ObservableObject {
     let recording: RecordingSession
     let transcribe: TranscriptionSession
+    let library: MeetingsLibrary
     @Published private(set) var permissions = PermissionStatus()
 
     init() {
         self.recording = RecordingSession()
         self.transcribe = TranscriptionSession(provider: LocalProvider())
+        self.library = MeetingsLibrary()
     }
 
     func refreshPermissions() async {
@@ -31,9 +33,14 @@ final class AppState: ObservableObject {
     func stopAndTranscribe() async {
         await recording.stop()
         guard let folder = recording.lastFolder else { return }
+        // Pick up the new folder before transcription writes its JSON, so
+        // the Library shows the recording immediately.
+        library.rescan()
         await transcribe.run(
             meetingFolder: folder,
             expectedSpeakers: AppPreferences.shared.expectedSpeakerCount.pyannoteValue
         )
+        // Re-read after transcript.json lands so duration / speakers fill in.
+        library.rescan()
     }
 }

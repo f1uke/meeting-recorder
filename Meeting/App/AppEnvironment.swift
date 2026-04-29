@@ -12,6 +12,7 @@ struct AppEnvironment: ViewModifier {
             .environmentObject(state)
             .environmentObject(state.recording)
             .environmentObject(state.transcribe)
+            .environmentObject(state.library)
     }
 }
 
