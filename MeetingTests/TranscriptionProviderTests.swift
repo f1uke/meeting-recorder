@@ -27,9 +27,6 @@ final class TranscriptionProviderTests: XCTestCase {
                     start: 0.0, end: 2.0,
                     speaker: .me, text: "hi", source: .mic
                 )
-            ],
-            words: [
-                TranscriptWord(word: "hi", start: 0.0, end: 0.5, speaker: .me)
             ]
         )
 
@@ -41,7 +38,6 @@ final class TranscriptionProviderTests: XCTestCase {
         XCTAssertEqual(decoded.segments.count, 1)
         XCTAssertEqual(decoded.segments[0].speaker, .me)
         XCTAssertEqual(decoded.segments[0].source, .mic)
-        XCTAssertEqual(decoded.words?.first?.word, "hi")
     }
 
     func test_transcriptSegment_idIsStableAcrossEncoding() throws {

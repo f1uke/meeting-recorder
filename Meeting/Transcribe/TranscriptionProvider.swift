@@ -43,15 +43,6 @@ struct TranscriptSegment: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
-/// Word-level timing — used internally to align with diarization turns and to
-/// drive scroll-sync in the transcript viewer. Optional in the canonical JSON.
-struct TranscriptWord: Codable, Hashable, Sendable {
-    let word: String
-    let start: TimeInterval
-    let end: TimeInterval
-    var speaker: SpeakerID?
-}
-
 /// Full result of one transcription run on a single audio file.
 struct TranscriptResult: Codable, Sendable {
     let provider: String
@@ -59,7 +50,6 @@ struct TranscriptResult: Codable, Sendable {
     let language: String?
     let duration: TimeInterval
     let segments: [TranscriptSegment]
-    let words: [TranscriptWord]?
 }
 
 // MARK: - Provider

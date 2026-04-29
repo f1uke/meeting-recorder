@@ -13,7 +13,6 @@ struct MergedTranscript: Codable, Sendable {
     let language: String?
     let providers: [String]
     let segments: [TranscriptSegment]
-    let words: [TranscriptWord]?
     let speakers: [Speaker]
 }
 
@@ -55,7 +54,6 @@ extension MergedTranscript {
             language: language,
             providers: providers,
             segments: updated,
-            words: words,
             speakers: speakers
         )
     }
@@ -74,18 +72,6 @@ enum TranscriptMerger {
         var segments = mic.segments + output.segments
         segments.sort { $0.start < $1.start }
 
-        let mergedWords: [TranscriptWord]?
-        switch (mic.words, output.words) {
-        case let (.some(m), .some(o)):
-            mergedWords = (m + o).sorted { $0.start < $1.start }
-        case let (.some(m), .none):
-            mergedWords = m
-        case let (.none, .some(o)):
-            mergedWords = o
-        case (.none, .none):
-            mergedWords = nil
-        }
-
         let speakers = collectSpeakers(from: segments, meDisplayName: meDisplayName)
 
         let providers = [mic.provider, output.provider]
@@ -96,7 +82,6 @@ enum TranscriptMerger {
             language: mic.language ?? output.language,
             providers: providers,
             segments: segments,
-            words: mergedWords,
             speakers: speakers
         )
     }

@@ -260,9 +260,19 @@ actor LocalProvider: TranscriptionProvider {
                 options: options,
                 progressCallback: pyannoteCallback
             )
+            // `.segment` (one Whisper segment = one output) instead of
+            // `.subsegment` because Thai (and CJK) word-level timestamps
+            // from WhisperKit are at the BPE-token level, not real word
+            // boundaries. `.subsegment` splits on inter-token gaps > 150ms,
+            // which on Thai routinely cuts mid-word — producing orphan
+            // vowels/tone marks like "ม" / "ีไมโครเซฟอรี่" or "เด" / "็ก".
+            // `.segment` keeps the Whisper segment as the unit and labels
+            // it with the dominant speaker via IoU matching; Whisper's VAD
+            // chunking already cuts at silences, so a single segment
+            // spanning two speakers is rare in practice.
             return result.addSpeakerInfo(
                 to: whisperChunks,
-                strategy: SpeakerInfoStrategy.subsegment
+                strategy: SpeakerInfoStrategy.segment
             )
         } catch {
             throw TranscriptionError.providerFailed(providerName, underlying: error)
@@ -280,7 +290,6 @@ actor LocalProvider: TranscriptionProvider {
         let speaker = options.knownSpeaker ?? SpeakerID.me
 
         var segments: [TranscriptSegment] = []
-        var words: [TranscriptWord] = []
         var totalDuration: TimeInterval = 0
         var detectedLanguage: String? = options.language
 
@@ -306,17 +315,6 @@ actor LocalProvider: TranscriptionProvider {
                     )
                 )
                 totalDuration = max(totalDuration, TimeInterval(seg.end))
-
-                for w in seg.words ?? [] {
-                    words.append(
-                        TranscriptWord(
-                            word: w.word,
-                            start: TimeInterval(w.start),
-                            end: TimeInterval(w.end),
-                            speaker: speaker
-                        )
-                    )
-                }
             }
         }
 
@@ -325,8 +323,7 @@ actor LocalProvider: TranscriptionProvider {
             model: modelVariant,
             language: detectedLanguage,
             duration: totalDuration,
-            segments: segments,
-            words: words.isEmpty ? nil : words
+            segments: segments
         )
     }
 
@@ -338,7 +335,6 @@ actor LocalProvider: TranscriptionProvider {
         modelVariant: String
     ) -> TranscriptResult {
         var segments: [TranscriptSegment] = []
-        var words: [TranscriptWord] = []
         var totalDuration: TimeInterval = 0
 
         let language = options.language ?? whisperChunks.first?.language
@@ -369,32 +365,19 @@ actor LocalProvider: TranscriptionProvider {
                     )
                 }
                 totalDuration = max(totalDuration, TimeInterval(spk.endTime))
-
-                for sw in spk.speakerWords {
-                    words.append(
-                        TranscriptWord(
-                            word: sw.wordTiming.word,
-                            start: TimeInterval(sw.wordTiming.start),
-                            end: TimeInterval(sw.wordTiming.end),
-                            speaker: sw.speaker.speakerId.map { SpeakerID.diarized($0) }
-                        )
-                    )
-                }
             }
         }
 
         // Stable timeline ordering — diarization can emit segments in
         // speaker-grouped order, which is unhelpful for transcript playback.
         segments.sort { $0.start < $1.start }
-        words.sort { $0.start < $1.start }
 
         return TranscriptResult(
             provider: providerName,
             model: modelVariant,
             language: language,
             duration: totalDuration,
-            segments: segments,
-            words: words.isEmpty ? nil : words
+            segments: segments
         )
     }
 }
