@@ -1,0 +1,79 @@
+import Foundation
+import ScreenCaptureKit
+import AVFoundation
+import CoreMedia
+
+@MainActor
+final class ScreenCaptureCoordinator: NSObject {
+    private var stream: SCStream?
+    private var recordingOutput: SCRecordingOutput?
+    private let recordingOutputDelegate = RecordingOutputLogger()
+    private let streamDelegate = StreamErrorLogger()
+    private let frameSink = FrameSink()
+    private let frameQueue = DispatchQueue(label: "dev.fluke.meeting.frame-sink")
+
+    func start(window: SCWindow, videoURL: URL) async throws {
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+
+        let config = SCStreamConfiguration()
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        config.width = max(2, Int(window.frame.width * scale))
+        config.height = max(2, Int(window.frame.height * scale))
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        config.queueDepth = 8
+        config.capturesAudio = false       // system audio comes via Core Audio Tap (M3)
+        config.captureMicrophone = false   // mic captured separately via MicRecorder
+        config.showsCursor = true
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+
+        let stream = SCStream(filter: filter, configuration: config, delegate: streamDelegate)
+
+        let recConfig = SCRecordingOutputConfiguration()
+        recConfig.outputURL = videoURL
+        recConfig.outputFileType = .mov
+
+        let recOutput = SCRecordingOutput(configuration: recConfig, delegate: recordingOutputDelegate)
+        try stream.addRecordingOutput(recOutput)
+
+        // SCStream still emits frames into its delivery pipeline even when
+        // SCRecordingOutput is the writer; without an SCStreamOutput the
+        // pipeline floods the log with "stream output NOT found. Dropping frame".
+        // A no-op stream output silences that without affecting recording.
+        try stream.addStreamOutput(frameSink, type: .screen, sampleHandlerQueue: frameQueue)
+
+        try await stream.startCapture()
+
+        self.stream = stream
+        self.recordingOutput = recOutput
+    }
+
+    func stop() async throws {
+        guard let stream else { return }
+        // stopCapture finalizes the SCRecordingOutput's file. Removing the
+        // output before stopping can cut writes off mid-frame, so we don't.
+        try await stream.stopCapture()
+        self.stream = nil
+        self.recordingOutput = nil
+    }
+}
+
+private final class RecordingOutputLogger: NSObject, SCRecordingOutputDelegate, @unchecked Sendable {
+    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: any Error) {
+        NSLog("[Meeting] SCRecordingOutput error: %@", String(describing: error))
+    }
+}
+
+private final class StreamErrorLogger: NSObject, SCStreamDelegate, @unchecked Sendable {
+    func stream(_ stream: SCStream, didStopWithError error: any Error) {
+        NSLog("[Meeting] SCStream stopped with error: %@", String(describing: error))
+    }
+}
+
+// SCRecordingOutput handles the actual file writing; this output exists only
+// to drain the SCStream sample pipeline so it stops emitting "stream output
+// NOT found" warnings.
+private final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        // intentional no-op
+    }
+}

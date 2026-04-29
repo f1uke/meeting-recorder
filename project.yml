@@ -1,0 +1,94 @@
+name: Meeting
+
+options:
+  bundleIdPrefix: dev.fluke
+  deploymentTarget:
+    macOS: "15.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+packages:
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/WhisperKit.git
+    from: 0.18.0
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_HARDENED_RUNTIME: YES
+    DEAD_CODE_STRIPPING: YES
+    CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED: YES
+
+targets:
+  Meeting:
+    type: application
+    platform: macOS
+    sources:
+      - path: Meeting
+    dependencies:
+      - package: ArgmaxOSS
+        product: WhisperKit
+      - package: ArgmaxOSS
+        product: SpeakerKit
+    info:
+      path: Meeting/Resources/Info.plist
+      properties:
+        CFBundleName: Meeting
+        CFBundleDisplayName: Meeting
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: "© 2026"
+        NSScreenCaptureUsageDescription: "Meeting records the window you choose so you can review meetings later."
+        NSMicrophoneUsageDescription: "Meeting records your microphone so your voice is included in transcripts."
+        NSAudioCaptureUsageDescription: "Meeting captures audio from the meeting app you choose so participants' voices can be transcribed separately."
+    entitlements:
+      path: Meeting/Resources/Meeting.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.fluke.meeting
+        GENERATE_INFOPLIST_FILE: NO
+        # Stable signing keeps TCC permissions across rebuilds.
+        # Switch DEVELOPMENT_TEAM to GBG6CR6BMX for the Finnomena team.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 49AUFL5Q3U
+
+  MeetingTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: MeetingTests
+    dependencies:
+      - target: Meeting
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.fluke.meeting.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 49AUFL5Q3U
+
+schemes:
+  Meeting:
+    build:
+      targets:
+        Meeting: all
+        MeetingTests: [test]
+    test:
+      targets: [MeetingTests]
+      gatherCoverageData: true
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
