@@ -1,0 +1,37 @@
+import SwiftUI
+
+/// The label rendered as the menu bar icon. Reactively reflects whether the
+/// app is idle, recording, or transcribing so the user can see status from
+/// anywhere on the system without opening the popover.
+///
+/// SwiftUI renders this view inside `MenuBarExtra(label:)`, which limits the
+/// vocabulary of supported primitives — Image + Text + simple shapes are
+/// safe. Custom shaders / complex hierarchies may not render.
+struct MenuBarLabel: View {
+    @ObservedObject var recording: RecordingSession
+    @ObservedObject var transcribe: TranscriptionSession
+
+    var body: some View {
+        switch (recording.state, transcribe.state) {
+        case let (.recording(_, started), _):
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 7, height: 7)
+                // Built-in self-updating timer — no per-second tick needed.
+                Text(started, style: .timer)
+                    .monospacedDigit()
+                    .font(.system(size: 11, weight: .medium))
+            }
+
+        case (_, .running):
+            HStack(spacing: 3) {
+                Image(systemName: "waveform")
+                Text("…").font(.system(size: 11, weight: .medium))
+            }
+
+        default:
+            Image(systemName: "mic.fill")
+        }
+    }
+}

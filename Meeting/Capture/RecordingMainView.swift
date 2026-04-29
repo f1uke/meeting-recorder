@@ -2,10 +2,10 @@ import SwiftUI
 import ScreenCaptureKit
 
 struct RecordingMainView: View {
-    @StateObject private var session = RecordingSession()
+    @EnvironmentObject private var session: RecordingSession
+    @EnvironmentObject private var transcribe: TranscriptionSession
     @StateObject private var picker = WindowPickerModel()
-    @StateObject private var transcribe = TranscriptionSession(provider: LocalProvider())
-    @StateObject private var prefs = AppPreferences.shared
+    @ObservedObject private var prefs = AppPreferences.shared
 
     var body: some View {
         switch (session.state, transcribe.state) {
