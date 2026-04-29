@@ -2,6 +2,7 @@ import Foundation
 import ScreenCaptureKit
 import AVFoundation
 import Combine
+import AppKit
 
 @MainActor
 final class RecordingSession: ObservableObject {
@@ -47,19 +48,35 @@ final class RecordingSession: ObservableObject {
     }
 
     func start(window: SCWindow) async {
-        guard state == .idle else { return }
+        guard state == .idle else {
+            NSLog("[Meeting/Session] start: bail — state is %@, expected .idle",
+                  String(describing: state))
+            return
+        }
         state = .starting
         errorMessage = nil
         marks = []
         micRMS.reset()
         outputRMS.reset()
 
+        // Bring the app to front so any TCC re-prompt dialogs (e.g. when
+        // the build's code signature isn't yet trusted) are visible to
+        // the user instead of stuck behind the menu-bar popover.
+        NSApp.activate(ignoringOtherApps: true)
+
+        // Watchdog: if any step hangs for 45s, force back to .idle with
+        // an actionable errorMessage. The await in `coord.start` /
+        // `engine.start()` / `AudioDeviceStart` can stall on TCC
+        // re-prompts that the user can't see.
+        scheduleStartWatchdog()
+
         let folder: URL
         do {
             folder = try Self.createFolder()
+            NSLog("[Meeting/Session] start: created folder %@",
+                  folder.path(percentEncoded: false))
         } catch {
-            errorMessage = "ไม่สามารถสร้างโฟลเดอร์: \(error.localizedDescription)"
-            state = .idle
+            failStart("ไม่สามารถสร้างโฟลเดอร์: \(error.localizedDescription)")
             return
         }
         currentFolder = folder
@@ -69,67 +86,131 @@ final class RecordingSession: ObservableObject {
         let outputURL = folder.appendingPathComponent("output.wav")
 
         guard let app = window.owningApplication else {
-            errorMessage = "หน้าต่างที่เลือกไม่มี application owner"
-            state = .idle
-            currentFolder = nil
+            failStart("หน้าต่างที่เลือกไม่มี application owner")
             return
         }
         let targetPID = app.processID
-        NSLog("[Meeting/Session] target app: name=%@ bundleID=%@ pid=%d title=%@",
-              app.applicationName,
-              app.bundleIdentifier,
-              targetPID,
-              window.title ?? "(none)")
+        let bundleID = app.bundleIdentifier
+        let appName = app.applicationName
+        NSLog("[Meeting/Session] start: target app name=%@ bundleID=%@ pid=%d title=%@",
+              appName, bundleID, targetPID, window.title ?? "(none)")
 
+        // Step 1: screen capture.
+        NSLog("[Meeting/Session] start: step 1 — SCStream.startCapture …")
         let coord = ScreenCaptureCoordinator()
         do {
             try await coord.start(window: window, videoURL: videoURL)
             self.coordinator = coord
+            NSLog("[Meeting/Session] start: step 1 done — SCStream live")
         } catch {
-            errorMessage = "ScreenCapture เริ่มไม่ได้: \(error.localizedDescription)"
-            state = .idle
-            currentFolder = nil
+            NSLog("[Meeting/Session] start: step 1 FAILED: %@", String(describing: error))
+            failStart("ScreenCapture เริ่มไม่ได้: \(error.localizedDescription)")
             return
         }
 
+        // Step 2: mic via AVAudioEngine.
+        NSLog("[Meeting/Session] start: step 2 — AVAudioEngine input tap …")
         let mic = MicRecorder()
         do {
             try mic.start(url: micURL, rmsBuffer: micRMS)
             self.micRecorder = mic
             self.micDeviceName = mic.deviceName
+            NSLog("[Meeting/Session] start: step 2 done — mic device=%@",
+                  mic.deviceName ?? "(unknown)")
         } catch {
+            NSLog("[Meeting/Session] start: step 2 FAILED: %@", String(describing: error))
             try? await coord.stop()
             self.coordinator = nil
-            errorMessage = "Microphone เริ่มไม่ได้: \(error.localizedDescription)"
-            state = .idle
-            currentFolder = nil
+            failStart("Microphone เริ่มไม่ได้: \(error.localizedDescription)")
             return
         }
 
+        // Step 3: per-process audio tap.
+        NSLog("[Meeting/Session] start: step 3 — Core Audio Tap …")
         let tap = ProcessAudioTap()
         do {
             try tap.start(
                 targetPID: targetPID,
-                targetBundleID: app.bundleIdentifier,
+                targetBundleID: bundleID,
                 url: outputURL,
                 rmsBuffer: outputRMS
             )
             self.processAudioTap = tap
             self.tapProcessCount = tap.processCount
+            NSLog("[Meeting/Session] start: step 3 done — tap processCount=%d",
+                  tap.processCount)
         } catch {
+            NSLog("[Meeting/Session] start: step 3 FAILED: %@", String(describing: error))
             mic.stop()
             self.micRecorder = nil
             try? await coord.stop()
             self.coordinator = nil
-            errorMessage = "Process audio tap เริ่มไม่ได้: \(error.localizedDescription)"
-            state = .idle
-            currentFolder = nil
+            failStart("Process audio tap เริ่มไม่ได้: \(error.localizedDescription)")
             return
         }
 
         currentSourceTitle = window.title
-        currentSourceApp = app.applicationName
+        currentSourceApp = appName
         state = .recording(folder: folder, started: Date())
+        cancelStartWatchdog()
+        NSLog("[Meeting/Session] start: ALL READY — state=recording")
+    }
+
+    /// User-facing escape hatch from the .starting state. Called by the
+    /// "Cancel start" button in PopoverTransientView when the spinner
+    /// has been showing for an unreasonably long time.
+    func cancelStart() {
+        NSLog("[Meeting/Session] cancelStart from state=%@",
+              String(describing: state))
+        micRecorder?.stop()
+        micRecorder = nil
+        processAudioTap?.stop()
+        processAudioTap = nil
+        if let coord = coordinator {
+            Task { try? await coord.stop() }
+        }
+        coordinator = nil
+        currentFolder = nil
+        currentSourceTitle = nil
+        currentSourceApp = nil
+        micDeviceName = nil
+        tapProcessCount = 0
+        cancelStartWatchdog()
+        if errorMessage == nil {
+            errorMessage = "Recording start cancelled."
+        }
+        state = .idle
+    }
+
+    // MARK: - Internals
+
+    private var startWatchdog: Task<Void, Never>?
+
+    private func scheduleStartWatchdog() {
+        startWatchdog?.cancel()
+        startWatchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 45 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            if self.state == .starting {
+                NSLog("[Meeting/Session] WATCHDOG: still .starting after 45s — aborting")
+                self.errorMessage = "Recording start hung for 45 s. Check Console.app for `[Meeting/Session]` logs to see which step stalled (likely a hidden TCC dialog or an unsigned binary)."
+                self.cancelStart()
+            }
+        }
+    }
+
+    private func cancelStartWatchdog() {
+        startWatchdog?.cancel()
+        startWatchdog = nil
+    }
+
+    /// Reset state to .idle with the given error and clean up any
+    /// resources that were already started before the failing step.
+    private func failStart(_ message: String) {
+        errorMessage = message
+        currentFolder = nil
+        cancelStartWatchdog()
+        state = .idle
     }
 
     /// Append a mark at the current elapsed time. Triggered by ⌘B or the

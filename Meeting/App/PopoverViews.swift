@@ -54,6 +54,10 @@ struct PopoverIdleView: View {
                 }
             }
 
+            if let error = recording.errorMessage {
+                ErrorBanner(message: error)
+            }
+
             RecentSection {
                 openWindow(id: "library")
             }
@@ -68,6 +72,34 @@ struct PopoverIdleView: View {
     private func startRecording() {
         guard let win = picker.selectedWindow else { return }
         Task { await recording.start(window: win) }
+    }
+}
+
+private struct ErrorBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.warmMark)
+                .padding(.top, 1)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.textPrimary)
+                .lineLimit(5)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+        .background {
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color.warmMark.opacity(0.10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9)
+                        .strokeBorder(Color.warmMark.opacity(0.35), lineWidth: 0.5)
+                }
+        }
     }
 }
 
@@ -164,16 +196,32 @@ struct PopoverRecordingView: View {
 
 struct PopoverTransientView: View {
     let label: String
+    var hint: String? = nil
+    var onCancel: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 12) {
             ProgressView().controlSize(.regular)
             Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.textDim)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.textPrimary)
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textDim)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+            }
+            if let onCancel {
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.brandAccent)
+                    .padding(.top, 4)
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 32)
+        .padding(.vertical, 28)
     }
 }
 

@@ -22,8 +22,14 @@ struct MenuBarPopoverView: View {
                 switch (recording.state, transcribe.state) {
                 case let (.recording(folder, started), _):
                     PopoverRecordingView(folder: folder, started: started)
-                case (.starting, _), (.stopping, _):
-                    PopoverTransientView(label: recording.state == .starting ? "เริ่มบันทึก…" : "หยุดบันทึก…")
+                case (.starting, _):
+                    PopoverTransientView(
+                        label: "เริ่มบันทึก…",
+                        hint: "ถ้าค้างนาน อาจมี macOS TCC dialog ซ่อนอยู่ — กด Cancel เพื่อย้อนกลับ",
+                        onCancel: { recording.cancelStart() }
+                    )
+                case (.stopping, _):
+                    PopoverTransientView(label: "หยุดบันทึก…")
                 case let (_, .running(stage)):
                     PopoverTranscribingView(stage: stage)
                 case let (_, .done(url)):
