@@ -24,16 +24,22 @@ struct LibraryView: View {
         }
         .frame(minWidth: 1080, minHeight: 700)
         .background {
-            // Subtle blue-tinted backdrop the panes blur against.
             LinearGradient(
                 colors: [
-                    Color(red: 0.96, green: 0.97, blue: 1.00),
-                    Color(red: 0.92, green: 0.94, blue: 0.99),
+                    Color(
+                        light: Color(red: 0.96, green: 0.97, blue: 1.00),
+                        dark: Color(red: 0.09, green: 0.10, blue: 0.13)
+                    ),
+                    Color(
+                        light: Color(red: 0.92, green: 0.94, blue: 0.99),
+                        dark: Color(red: 0.05, green: 0.06, blue: 0.09)
+                    ),
                 ],
                 startPoint: .top, endPoint: .bottom
             )
             .ignoresSafeArea()
         }
+        .onAppear { library.rescan() }
     }
 }
 
@@ -43,13 +49,14 @@ struct LibraryView: View {
 
 private struct LibrarySidebar: View {
     @EnvironmentObject private var library: MeetingsLibrary
+    @Environment(\.colorScheme) private var scheme
     @State private var storage = StorageUsage(usedBytes: 0, freeBytes: 0)
 
     var body: some View {
         ZStack {
             Color.clear
                 .background(.thickMaterial)
-                .overlay(GlassTint.sidebar.tintColor(for: .light))
+                .overlay(GlassTint.sidebar.tintColor(for: scheme))
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -109,14 +116,13 @@ private struct LibrarySidebar: View {
                     .padding(12)
                     .overlay(alignment: .top) {
                         Rectangle()
-                            .fill(Color.black.opacity(0.06))
+                            .fill(Color.primary.opacity(0.08))
                             .frame(height: 0.5)
                     }
             }
         }
-        .task {
-            storage = library.storageUsage()
-        }
+        .task { storage = library.storageUsage() }
+        .onChange(of: library.meetings.count) { storage = library.storageUsage() }
     }
 
     private func tagColor(for name: String) -> Color {
@@ -175,7 +181,7 @@ private struct SidebarRow: View {
             .background {
                 if isSelected {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Color.black.opacity(0.08))
+                        .fill(Color.primary.opacity(0.10))
                 }
             }
         }
@@ -191,11 +197,11 @@ private struct StorageFooter: View {
             SectionLabel(text: "Storage")
 
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.black.opacity(0.08)).frame(height: 4)
+                Capsule().fill(Color.primary.opacity(0.10)).frame(height: 4)
                 GeometryReader { proxy in
                     Capsule()
                         .fill(LinearGradient(
-                            colors: [Color.brandAccent, Color(red: 0.40, green: 0.78, blue: 0.95)],
+                            colors: [Color.brandAccent, Color.brandAccent.opacity(0.65)],
                             startPoint: .leading, endPoint: .trailing
                         ))
                         .frame(width: proxy.size.width * usage.usedFraction, height: 4)
@@ -326,7 +332,7 @@ private struct ListToolbar: View {
                     .fill(.regularMaterial)
                     .overlay {
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                     }
             }
             // Hidden button focuses the search field on ⌘F. Visible label
@@ -343,7 +349,7 @@ private struct ListToolbar: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.black.opacity(0.06)).frame(height: 0.5)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
         }
     }
 
@@ -567,7 +573,7 @@ private struct DetailToolbar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.black.opacity(0.06)).frame(height: 0.5)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
         }
         .alert("Send transcript to Claude?", isPresented: $showDisclosure) {
             Button("Cancel", role: .cancel) {}
@@ -730,11 +736,8 @@ private struct SpeakerCard: View {
         .background {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.5), lineWidth: 0.5)
-                }
         }
+        .glassBorder(cornerRadius: 10)
     }
 
     private var initials: String {
@@ -875,11 +878,8 @@ private struct AISummarySection: View {
                     ],
                     startPoint: .topLeading, endPoint: .bottomTrailing
                 ))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.6), lineWidth: 0.5)
-                }
         }
+        .glassBorder(cornerRadius: 14)
     }
 
     private var runningCard: some View {
@@ -1007,10 +1007,7 @@ private struct ActionItemRow: View {
         .background {
             RoundedRectangle(cornerRadius: 9)
                 .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 9)
-                        .strokeBorder(Color.white.opacity(0.5), lineWidth: 0.5)
-                }
         }
+        .glassBorder(cornerRadius: 9)
     }
 }

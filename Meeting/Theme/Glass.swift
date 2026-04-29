@@ -82,6 +82,41 @@ enum GlassShadow {
     }
 }
 
+// MARK: - Adaptive Liquid Glass border
+//
+// The signature top-highlight stroke that sits on a `Material` surface.
+// Bright in light mode, much fainter in dark mode — matches Apple's Tahoe
+// Liquid Glass treatment where the highlight reads on the bright top edge
+// and fades into the body of the glass.
+
+extension View {
+    /// Apply the standard Liquid Glass border to a rounded shape used as
+    /// a card / chip / panel background.
+    func glassBorder(cornerRadius: CGFloat) -> some View {
+        modifier(GlassBorderModifier(cornerRadius: cornerRadius))
+    }
+}
+
+private struct GlassBorderModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: scheme == .dark
+                            ? [Color.white.opacity(0.16), Color.white.opacity(0.03)]
+                            : [Color.white.opacity(0.60), Color.white.opacity(0.20)],
+                        startPoint: .top, endPoint: .bottom
+                    ),
+                    lineWidth: 0.5
+                )
+        }
+    }
+}
+
 // MARK: - GlassPill — capsule background style
 
 /// Capsule glass pill used as the background for row chips and small status

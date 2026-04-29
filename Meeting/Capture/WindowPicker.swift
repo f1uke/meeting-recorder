@@ -159,10 +159,10 @@ struct WindowPicker: View {
             .frame(height: 180)
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.black.opacity(0.04))
+                    .fill(Color.primary.opacity(0.05))
                     .overlay {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                     }
             }
         }

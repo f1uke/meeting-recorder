@@ -197,12 +197,9 @@ struct TranscriptReadyToastView: View {
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
-                }
                 .shadow(color: .black.opacity(0.30), radius: 24, y: 8)
         }
+        .glassBorder(cornerRadius: 14)
         .padding(8)
     }
 }

@@ -98,11 +98,22 @@ struct MeetingOverride: Codable, Equatable, Sendable {
 enum MeetingFolderName {
     /// Parse a `2026-04-29_14-30-15` (or `…-2`) folder name into its base
     /// timestamp portion. Returns the folder name as-is if no match.
+    /// Anchors on the full `yyyy-MM-dd_HH-mm-ss` shape so the trailing
+    /// `-\d+` collision suffix is only stripped when it sits *after* a
+    /// valid timestamp — otherwise a regex like `-\d+$` would eat the
+    /// seconds (e.g. "…00-30-21" → "…00-30").
     static func stripCollisionSuffix(_ folderName: String) -> String {
-        if let range = folderName.range(of: #"-\d+$"#, options: .regularExpression) {
-            return String(folderName[..<range.lowerBound])
+        let pattern = #"^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(-\d+)?$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                  in: folderName,
+                  range: NSRange(folderName.startIndex..., in: folderName)
+              ),
+              let baseRange = Range(match.range(at: 1), in: folderName)
+        else {
+            return folderName
         }
-        return folderName
+        return String(folderName[baseRange])
     }
 
     /// Decode the folder name into a `Date`. Returns `Date.distantPast` if

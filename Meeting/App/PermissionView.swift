@@ -112,7 +112,13 @@ private struct PermissionRow: View {
                 .fill(.regularMaterial)
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.55), Color.white.opacity(0.10)],
+                                startPoint: .top, endPoint: .bottom
+                            ),
+                            lineWidth: 0.5
+                        )
                 }
         }
     }
@@ -122,7 +128,7 @@ private struct PermissionRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(granted
                     ? Color.brandSuccess.opacity(0.18)
-                    : Color.black.opacity(0.05)
+                    : Color.primary.opacity(0.06)
                 )
                 .frame(width: 32, height: 32)
             Image(systemName: iconName)

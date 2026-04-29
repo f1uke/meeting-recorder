@@ -16,8 +16,14 @@ struct TranscriptViewerView: View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(red: 0.96, green: 0.97, blue: 1.00),
-                    Color(red: 0.92, green: 0.94, blue: 0.99),
+                    Color(
+                        light: Color(red: 0.96, green: 0.97, blue: 1.00),
+                        dark: Color(red: 0.09, green: 0.10, blue: 0.13)
+                    ),
+                    Color(
+                        light: Color(red: 0.92, green: 0.94, blue: 0.99),
+                        dark: Color(red: 0.05, green: 0.06, blue: 0.09)
+                    ),
                 ],
                 startPoint: .top, endPoint: .bottom
             )
@@ -46,12 +52,13 @@ struct TranscriptViewerView: View {
 private struct TranscriptNavRail: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         ZStack {
             Color.clear
                 .background(.thickMaterial)
-                .overlay(GlassTint.sidebar.tintColor(for: .light))
+                .overlay(GlassTint.sidebar.tintColor(for: scheme))
 
             VStack(spacing: 6) {
                 // Header gives traffic lights room.
@@ -85,7 +92,7 @@ private struct NavRailButton: View {
                 .background {
                     if active {
                         RoundedRectangle(cornerRadius: 9)
-                            .fill(Color.black.opacity(0.08))
+                            .fill(Color.primary.opacity(0.10))
                     }
                 }
         }
@@ -235,7 +242,7 @@ private struct TranscriptToolbar: View {
                     .fill(.regularMaterial)
                     .overlay {
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                     }
             }
             .background {
@@ -259,7 +266,7 @@ private struct TranscriptToolbar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.black.opacity(0.06)).frame(height: 0.5)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
         }
     }
 
@@ -299,7 +306,7 @@ private struct ToolbarPill: View {
                     .fill(.regularMaterial)
                     .overlay {
                         RoundedRectangle(cornerRadius: 7)
-                            .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                     }
             }
         }
@@ -329,6 +336,7 @@ private struct TranscriptLeftColumn: View {
 
 private struct VideoPanel: View {
     @ObservedObject var playerModel: VideoPlayerModel
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(spacing: 0) {
@@ -358,8 +366,17 @@ private struct VideoPanel: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.black.opacity(0.1), lineWidth: 0.5)
+                .strokeBorder(
+                    scheme == .dark
+                        ? Color.white.opacity(0.10)
+                        : Color.black.opacity(0.12),
+                    lineWidth: 0.5
+                )
         }
+        .shadow(
+            color: Color.black.opacity(scheme == .dark ? 0.40 : 0.18),
+            radius: 12, y: 6
+        )
     }
 }
 
@@ -401,12 +418,7 @@ private struct SpeakersPanel: View {
         }
         .padding(12)
         .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.5), lineWidth: 0.5)
-                }
+            GlassCard(radius: 12) { Color.clear }
         }
     }
 
@@ -517,12 +529,7 @@ private struct MomentsPanel: View {
         }
         .padding(12)
         .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.5), lineWidth: 0.5)
-                }
+            GlassCard(radius: 12) { Color.clear }
         }
     }
 
@@ -593,7 +600,7 @@ private struct TranscriptScrollPane: View {
         }
         .padding(.bottom, 8)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.black.opacity(0.06)).frame(height: 0.5)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
         }
     }
 
@@ -771,7 +778,10 @@ private struct SegmentRow: View {
               let range = attr[cursor..<attr.endIndex]
                   .range(of: trimmed, options: .caseInsensitive) {
             attr[range].backgroundColor = Color.warmMark.opacity(0.35)
-            attr[range].foregroundColor = Color(red: 0.35, green: 0.21, blue: 0)
+            attr[range].foregroundColor = Color(
+                light: Color(red: 0.35, green: 0.21, blue: 0),
+                dark: Color(red: 1.00, green: 0.86, blue: 0.50)
+            )
             cursor = range.upperBound
         }
         return attr

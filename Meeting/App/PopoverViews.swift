@@ -232,10 +232,10 @@ struct PopoverTranscribingView: View {
 
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
-                            Capsule().fill(Color.black.opacity(0.06))
+                            Capsule().fill(Color.primary.opacity(0.08))
                             Capsule()
                                 .fill(LinearGradient(
-                                    colors: [Color.brandAccent, Color(red: 0.40, green: 0.78, blue: 0.95)],
+                                    colors: [Color.brandAccent, Color.brandAccent.opacity(0.7)],
                                     startPoint: .leading, endPoint: .trailing
                                 ))
                                 .frame(width: proxy.size.width * progressFraction)
@@ -284,11 +284,11 @@ struct PopoverTranscribingView: View {
         let order = TranscriptionSession.Stage.pipeline
         guard let i = order.firstIndex(of: s),
               let cur = order.firstIndex(of: stage) else {
-            return Color.black.opacity(0.08)
+            return Color.primary.opacity(0.10)
         }
         if i < cur { return Color.brandAccent }
         if i == cur { return Color.brandAccent.opacity(0.5) }
-        return Color.black.opacity(0.08)
+        return Color.primary.opacity(0.10)
     }
 }
 
@@ -401,6 +401,7 @@ struct PopoverHeader<Trailing: View>: View {
 
 struct SpeakerCountChip: View {
     @Binding var selection: ExpectedSpeakers
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(spacing: 8) {
@@ -427,7 +428,12 @@ struct SpeakerCountChip: View {
                 .fill(.regularMaterial)
                 .overlay {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
+                        .strokeBorder(
+                            scheme == .dark
+                                ? Color.white.opacity(0.14)
+                                : Color.white.opacity(0.45),
+                            lineWidth: 0.5
+                        )
                 }
         }
     }
@@ -504,7 +510,7 @@ struct RecentSection: View {
         .padding(.top, 4)
         .overlay(alignment: .top) {
             Rectangle()
-                .fill(Color.black.opacity(0.08))
+                .fill(Color.primary.opacity(0.10))
                 .frame(height: 0.5)
                 .offset(y: -8)
         }
@@ -553,7 +559,7 @@ struct LiveChannelMeter: View {
                     .padding(.vertical, 2)
                     .background {
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.black.opacity(0.04))
+                            .fill(Color.primary.opacity(0.06))
                     }
 
                 Text(peakText)
@@ -577,6 +583,7 @@ struct BookmarksChip: View {
     let count: Int
     let lastTimestamp: TimeInterval?
     let onMark: () -> Void
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(spacing: 8) {
@@ -608,7 +615,12 @@ struct BookmarksChip: View {
                 .fill(.regularMaterial)
                 .overlay {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
+                        .strokeBorder(
+                            scheme == .dark
+                                ? Color.white.opacity(0.14)
+                                : Color.white.opacity(0.45),
+                            lineWidth: 0.5
+                        )
                 }
         }
     }
