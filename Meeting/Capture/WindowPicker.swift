@@ -98,7 +98,6 @@ struct WindowPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("เลือกหน้าต่างที่จะบันทึก").font(.headline)
                 Spacer()
                 if model.isLoading {
                     ProgressView().controlSize(.small)
@@ -109,7 +108,7 @@ struct WindowPicker: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
-                .help("Refresh")
+                .help("Refresh window list")
             }
 
             if let error = model.loadError {

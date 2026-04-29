@@ -12,6 +12,9 @@ final class AppState: ObservableObject {
     let library: MeetingsLibrary
     let toast: ToastPresenter
     let llm: LLMProvider
+    /// Window picker model lives at app scope so the menu-bar popover and
+    /// the standalone picker window share the same selection state.
+    let picker: WindowPickerModel
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
 
@@ -26,6 +29,7 @@ final class AppState: ObservableObject {
         self.library = MeetingsLibrary()
         self.toast = ToastPresenter()
         self.llm = ClaudeCLIProvider()
+        self.picker = WindowPickerModel()
 
         Task { @MainActor [weak self] in
             guard let self else { return }

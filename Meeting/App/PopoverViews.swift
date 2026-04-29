@@ -9,12 +9,10 @@ import AppKit
 struct PopoverIdleView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var recording: RecordingSession
-    @StateObject private var picker = WindowPickerModel()
+    @EnvironmentObject private var picker: WindowPickerModel
     @ObservedObject private var prefs = AppPreferences.shared
 
     @Environment(\.openWindow) private var openWindow
-    @State private var showWindowPickerSheet = false
-    @State private var showSettingsSheet = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -22,14 +20,8 @@ struct PopoverIdleView: View {
                 title: "Meeting",
                 subtitle: "Ready to record",
                 trailing: {
-                    HStack(spacing: 6) {
-                        GlassIconButton(systemImage: "magnifyingglass", size: 26) {
-                            // Search — wired to library search in U5
-                            openWindow(id: "library")
-                        }
-                        GlassIconButton(systemImage: "gearshape", size: 26) {
-                            showSettingsSheet = true
-                        }
+                    GlassIconButton(systemImage: "books.vertical", size: 26) {
+                        openWindow(id: "library")
                     }
                 }
             )
@@ -39,7 +31,7 @@ struct PopoverIdleView: View {
                 WindowChip(
                     window: picker.selectedWindow,
                     icon: picker.selectedWindow.flatMap { picker.icon(for: $0) },
-                    onChange: { showWindowPickerSheet = true }
+                    onChange: { openWindow(id: "windowPicker") }
                 )
             }
 
@@ -65,12 +57,6 @@ struct PopoverIdleView: View {
             RecentSection {
                 openWindow(id: "library")
             }
-        }
-        .sheet(isPresented: $showWindowPickerSheet) {
-            WindowPickerSheet(picker: picker, onDismiss: { showWindowPickerSheet = false })
-        }
-        .sheet(isPresented: $showSettingsSheet) {
-            SettingsStubSheet(onDismiss: { showSettingsSheet = false })
         }
         .task {
             if picker.windows.isEmpty {
@@ -700,84 +686,6 @@ struct BookmarksChip: View {
         return h > 0
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%d:%02d", m, s)
-    }
-}
-
-// =============================================================================
-// MARK: - Window picker sheet
-// =============================================================================
-
-struct WindowPickerSheet: View {
-    @ObservedObject var picker: WindowPickerModel
-    let onDismiss: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Choose a window")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.textPrimary)
-                Spacer()
-                Button(action: onDismiss) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.textDim)
-                        .padding(6)
-                        .background(Circle().fill(Color.black.opacity(0.06)))
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(12)
-
-            Divider()
-
-            WindowPicker(model: picker)
-                .padding(12)
-                .frame(minHeight: 320)
-
-            HStack {
-                Spacer()
-                GlassButton(style: .accent, action: onDismiss) {
-                    Text(picker.selectedWindow == nil ? "Cancel" : "Done")
-                        .padding(.horizontal, 8)
-                }
-                .frame(width: 120)
-            }
-            .padding(12)
-        }
-        .frame(width: 420, height: 520)
-        .background {
-            Color.clear.background(.regularMaterial).ignoresSafeArea()
-        }
-    }
-}
-
-// =============================================================================
-// MARK: - Settings stub
-// =============================================================================
-
-struct SettingsStubSheet: View {
-    let onDismiss: () -> Void
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Settings")
-                .font(.serif(28))
-                .foregroundStyle(Color.textPrimary)
-            Text("Coming soon — audio device picker, model size, AI toggle")
-                .font(.system(size: 12))
-                .foregroundStyle(Color.textDim)
-                .multilineTextAlignment(.center)
-            GlassButton(style: .accent, action: onDismiss) {
-                Text("Close")
-            }
-            .frame(width: 100)
-        }
-        .padding(32)
-        .frame(width: 360)
-        .background {
-            Color.clear.background(.regularMaterial).ignoresSafeArea()
-        }
     }
 }
 

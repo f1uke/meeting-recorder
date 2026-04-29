@@ -32,6 +32,14 @@ struct MeetingApp: App {
         }
         .windowResizability(.contentSize)
 
+        // Standalone window picker — replaces the .sheet that fought with
+        // the menu-bar popover's focus model on macOS.
+        Window("Pick a window to record", id: "windowPicker") {
+            WindowPickerWindowView()
+                .appEnvironment(appState)
+        }
+        .windowResizability(.contentSize)
+
         Window("Transcript", id: "transcript") {
             TranscriptViewerView()
                 .appEnvironment(appState)
