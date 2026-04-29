@@ -557,6 +557,7 @@ private struct TranscriptScrollPane: View {
                         segment: segment,
                         speakers: transcript.speakers,
                         searchQuery: search,
+                        actionItem: actionItem(for: segment),
                         onSeek: { playerModel.seek(to: segment.start) },
                         onCommitEdit: { newText in
                             transcript = transcript.updatingSegment(id: segment.id, text: newText)
@@ -566,6 +567,17 @@ private struct TranscriptScrollPane: View {
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
+        }
+    }
+
+    /// Match action items (from cached summary.json) to segments by
+    /// timestamp. An action item highlights the segment containing its
+    /// parsed timestamp; ties are resolved by closest-start-time.
+    private func actionItem(for segment: TranscriptSegment) -> ActionItem? {
+        guard let items = meeting.summary?.actionItems else { return nil }
+        return items.first { item in
+            guard let t = item.timestampSeconds else { return false }
+            return t >= segment.start && t < segment.end
         }
     }
 
@@ -608,6 +620,7 @@ private struct SegmentRow: View {
     let segment: TranscriptSegment
     let speakers: [Speaker]
     let searchQuery: String
+    let actionItem: ActionItem?
     let onSeek: () -> Void
     let onCommitEdit: (String) -> Void
 
@@ -638,15 +651,55 @@ private struct SegmentRow: View {
             if isEditing {
                 editingBody
             } else {
-                Text(highlightedText)
-                    .font(.system(size: 14))
-                    .lineSpacing(4)
-                    .foregroundStyle(Color.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .onTapGesture(count: 2) {
-                        draft = segment.text
-                        isEditing = true
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(highlightedText)
+                        .font(.system(size: 14))
+                        .lineSpacing(4)
+                        .foregroundStyle(Color.textPrimary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onTapGesture(count: 2) {
+                            draft = segment.text
+                            isEditing = true
+                        }
+                    if actionItem != nil {
+                        HStack(spacing: 6) {
+                            Text("ACTION ITEM")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(Color.warmMark)
+                                .kerning(0.6)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background {
+                                    Capsule().fill(Color.warmMark.opacity(0.18))
+                                }
+                            Text("Auto-detected by Claude")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.textDim)
+                        }
                     }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, actionItem != nil ? 16 : 0)
+        .padding(.vertical, actionItem != nil ? 12 : 0)
+        .background {
+            if actionItem != nil {
+                LinearGradient(
+                    colors: [
+                        Color.warmMark.opacity(0.15),
+                        Color.clear,
+                    ],
+                    startPoint: .leading, endPoint: .trailing
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .overlay(alignment: .leading) {
+            if actionItem != nil {
+                Rectangle()
+                    .fill(Color.warmMark)
+                    .frame(width: 2)
             }
         }
     }

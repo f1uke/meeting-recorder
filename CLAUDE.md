@@ -41,21 +41,23 @@ Stable signing is critical: macOS TCC keys "Allowed apps" by code signature, so 
 
 ## High-level architecture
 
-Three layers, each in its own folder under `Meeting/`:
+Five layers, each in its own folder under `Meeting/`:
 
 ### `Meeting/Capture/` — recording pipeline
 
 `RecordingSession` (@MainActor) is the orchestrator. On `start(window:)` it spins up three independent capture pipelines and on `stop()` tears them down in the right order so each file's trailer flushes:
 
 - **`ScreenCaptureCoordinator`** — `SCStream` with a window-only `SCContentFilter` plus `SCRecordingOutput` writing `video.mov`. Includes a no-op `SCStreamOutput` (`FrameSink`) purely to silence "stream output NOT found, dropping frame" log spam that SCStream emits when no consumer is attached.
-- **`MicRecorder`** — `AVAudioEngine` input tap → `AVAudioFile` writing `mic.wav` as 16-bit interleaved PCM. Intentionally **not `@MainActor`** (see "Audio thread isolation" below).
-- **`ProcessAudioTap`** — Core Audio Tap (`CATapDescription` + private aggregate device + `AudioDeviceCreateIOProcIDWithBlock`) writing `output.wav`. This is the only API that captures a single app's audio without picking up the rest of the system.
+- **`MicRecorder`** — `AVAudioEngine` input tap → `AVAudioFile` writing `mic.wav` as 16-bit interleaved PCM. Intentionally **not `@MainActor`** (see "Audio thread isolation" below). Pushes per-buffer normalized RMS into a caller-supplied `RMSRingBuffer` so the live waveform UI can read levels without owning the recorder.
+- **`ProcessAudioTap`** — Core Audio Tap (`CATapDescription` + private aggregate device + `AudioDeviceCreateIOProcIDWithBlock`) writing `output.wav`. This is the only API that captures a single app's audio without picking up the rest of the system. Also pushes RMS samples and exposes `processCount` for the multi-helper sublabel.
+- **`RMSRingBuffer`** — lock-protected ring of 96 normalized-RMS samples (0...1, log-scaled −60dB→0). Owned by `RecordingSession` so it survives recorder restart; consumed by waveform views via `snapshot(last:)` at 15-20Hz under `TimelineView`.
+- **`Mark` / `MarksFile`** — Codable types persisted to `<meeting>/marks.json`. `RecordingSession.mark()` (bound to ⌘B globally via `AppCommands`) appends a timestamp; written on stop.
 
-Files land at `~/Documents/Meetings/<yyyy-MM-dd_HH-mm-ss>/`. Folder names auto-suffix `-2`, `-3`, etc., on collisions.
+Files land at `~/Documents/Meetings/<yyyy-MM-dd_HH-mm-ss>/`. Folder names auto-suffix `-2`, `-3`, etc., on collisions. Per-meeting artifacts: `video.mov`, `mic.wav`, `output.wav`, `transcript.{json,md,srt}`, `marks.json`, optionally `summary.json`.
 
-### `Meeting/Transcribe/` — transcription pipeline
+### `Meeting/Transcribe/` — transcription + LLM pipeline
 
-`TranscriptionProvider` (Sendable protocol) is the abstraction. After `RecordingSession` finishes, `RecordingMainView` invokes `TranscriptionSession.run(meetingFolder:expectedSpeakers:)` which:
+`TranscriptionProvider` (Sendable protocol) is the abstraction. After `RecordingSession` finishes, `AppState.stopAndTranscribe()` invokes `TranscriptionSession.run(meetingFolder:expectedSpeakers:)` which:
 
 1. Calls the provider on `mic.wav` with `knownSpeaker: .me` (no diarization).
 2. Calls the provider on `output.wav` with `withDiarization: true`.
@@ -68,9 +70,41 @@ Files land at `~/Documents/Meetings/<yyyy-MM-dd_HH-mm-ss>/`. Folder names auto-s
 
 `ModelStorage.downloadBase()` returns `~/Library/Application Support/dev.fluke.meeting/Models/` and is passed to both `WhisperKitConfig.downloadBase` and `PyannoteConfig.modelDownloadConfig.downloadBase`. Without this override the kits dump multi-GB CoreML weights into `~/Documents/huggingface/`, which iCloud sync ingests.
 
-### `Meeting/App/` — shell, permissions, preferences
+`LLMProvider` + `ClaudeCLIProvider` (the only implementation) shells out to `claude -p --output-format json` via `Process`, piping the meeting's markdown transcript via stdin and parsing the JSON response into a `Summary` (1-2 paragraph summary + structured `ActionItem`s). Cached on disk at `<meeting>/summary.json`. `which claude` resolves once at init via login-shell so the UI can disable the "Generate Summary" button when Claude Code isn't installed. First-use flow gates on a one-time disclosure alert (`@AppStorage` flag) since it's the only step that ever leaves the device.
 
-`MeetingApp` (`@main`) hosts a single `WindowGroup` containing `ContentView`, which routes to either `PermissionView` or `RecordingMainView` based on `AppState.permissions`. `PermissionManager` checks/requests the three TCC services using `CGPreflightScreenCaptureAccess`, `AVCaptureDevice.requestAccess`, and a `CATapDescription(stereoGlobalTapButExcludeProcesses: [])` probe (note: the **global** tap variant, because the empty-mixdown variant returns `kAudioUnitErr_InvalidElement` and never triggers the TCC prompt). `AppPreferences` persists user settings (currently just `expectedSpeakerCount` for diarization) via `UserDefaults`.
+`MergedTranscript` has `read(from:)` / `write(to:)` helpers and `updatingSegment(id:text:)` so the Transcript Viewer's inline segment edits round-trip through `transcript.json` atomically.
+
+### `Meeting/Library/` — Library store + window
+
+`MeetingsLibrary` (`@MainActor` `ObservableObject`) is the in-memory index of `~/Documents/Meetings/`. Watches the parent folder via `DispatchSourceFileSystemObject` (event handler uses `MainActor.assumeIsolated` since it dispatches on `.main`), publishes `meetings`, `selection`, `search`, `sidebarFilter`, plus computed `visibleMeetings` / `recent` / `selectedMeeting` / `storageUsage`. Initial load + watcher start are deferred to the next runloop in init via `Task { @MainActor … }` so unit-test runners can attach to the host app without fighting init-time disk I/O.
+
+`MeetingRecord` is per-folder model derived from `transcript.json` (duration / speakers), `marks.json`, `summary.json`, and the timestamp in the folder name. User overrides (title, tags, starred, customSpeakerNames) layer on top via `library.json` at `~/Library/Application Support/dev.fluke.meeting/library.json`. Speaker rename writes through `MeetingsLibrary.update(meeting:transform:)` which atomically rewrites `library.json` and triggers a rescan.
+
+`LibraryView` is the 1080×700 three-pane window: 220pt sidebar (Library / Tags / Storage groups), 380pt list (grouped by Today / Yesterday / This week / Earlier with ⌘F search), and the detail pane (toolbar with Open Transcript / Summary / Share / star, hero serif title with double-click rename, AI Summary card from `summary.json`, action items list, speakers strip, marked moments).
+
+### `Meeting/Theme/` — design system
+
+Liquid Glass primitives shared across every redesigned surface:
+
+- `DesignTokens.swift` — adaptive `Color(light:dark:)` initializer wrapping `NSColor(name:dynamicProvider:)`. Brand palette (`brandAccent`, `brandAccentStrong`, `recordRed`, `warmMark`, `brandSuccess`), text (`textPrimary` / `textDim` / `textFaint`), tag palette (5 hues), `GlassTint` enum (`.neutral`, `.sidebar`, `.recordingDark`, `.accentWash`), `Font.serif(_:)` (custom New York with system-serif fallback) + `Font.mono(_:)` (monospaced + tabular nums). `Tokens` enum has layout constants (cardRadius=14, primaryButtonHeight=38).
+- `Glass.swift` — `GlassCard` (Material + tint overlay + 0.5pt highlight stroke + adaptive shadow), `GlassPill`, `GlassButton` (.accent / .danger / .neutral), `GlassIconButton`. Built on SwiftUI `Material` API so Tahoe's Liquid Glass kicks in automatically on macOS 26 and degrades to classic vibrancy on macOS 15.
+- `Components.swift` — `PulseDot` (1.6s recording indicator), `WaveformBars` (Canvas-based, takes `[Float]` and renders a vertical-gradient bar pattern), `SectionLabel`, `Avatar`.
+
+### `Meeting/App/` — shell, permissions, popover, toast
+
+`MeetingApp` (`@main`) is now four scenes:
+1. `MenuBarExtra(.window)` — primary entry. Label is `MenuBarLabel` (mic.fill idle / red dot + auto-updating mono timer when recording / waveform + ellipsis when transcribing). Content is `MenuBarPopoverView` which routes between PermissionView (gate) → PopoverIdleView → PopoverRecordingView → PopoverTransientView (.starting / .stopping) → PopoverTranscribingView → PopoverDoneView / PopoverFailedView based on the combined `(permissions, recording, transcribe)` state.
+2. `Window("Library", id: "library")` — `LibraryView`.
+3. `Window("Recording", id: "recording")` — `RecordingWindowView` (720×480 forced-dark with 72pt mono timer + dual 96-bar waveforms + marks card + Stop & Transcribe). Opened from the popover's expand button.
+4. `Window("Transcript", id: "transcript")` — `TranscriptViewerView` (1180×760 with 56pt nav rail, AVPlayer of video.mov, speakers card with inline rename, moments list, search-aware diarized segments, ACTION ITEM highlight when matched against a `summary.json` action item's parsed timestamp).
+
+`AppCommands` (attached via `.commands { … }`) registers ⌘B (Mark moment) and ⌘. (Stop & Transcribe) globally so the shortcuts fire whenever the app is frontmost regardless of which window has focus.
+
+`AppState` (`@MainActor`) owns the long-lived `RecordingSession`, `TranscriptionSession`, `MeetingsLibrary`, `ToastPresenter`, and `LLMProvider` instances. `AppEnvironment` view modifier injects them into every scene via `.appEnvironment(state)`. `stopAndTranscribe()` chains the post-recording flow: stop → rescan library → transcribe → rescan library → toast on success.
+
+`ToastPresenter` (`@MainActor`) hosts an `NSPanel` (.borderless + .nonactivatingPanel + .floating level) for the "Transcript ready" toast. Slide-in from y+24 with 0.32s easeOut, auto-dismiss after 8s with 0.18s easeIn slide-out. Open button reveals `transcript.md` in Finder.
+
+`PermissionManager` checks/requests the three TCC services using `CGPreflightScreenCaptureAccess`, `AVCaptureDevice.requestAccess`, and a `CATapDescription(stereoGlobalTapButExcludeProcesses: [])` probe (note: the **global** tap variant, because the empty-mixdown variant returns `kAudioUnitErr_InvalidElement` and never triggers the TCC prompt). `AppPreferences` persists user settings via `UserDefaults`.
 
 ## Project-specific gotchas
 
@@ -91,6 +125,14 @@ Discord, Slack, Teams, VS Code Live Share — Chromium-based apps put VoIP/media
 ### `List(selection:)` and SwiftUI publish warnings
 
 macOS's `List` writes the selection binding synchronously inside the click event, mid-render. If the binding is on an `@Published` property, this triggers "Publishing changes from within view updates is not allowed". `WindowPicker.deferredSelection` wraps the binding so the write is deferred via `DispatchQueue.main.async`. Apply the same pattern to any new `List(selection:)` bound to `@Published` state.
+
+### Test runner hangs on stale Meeting.app
+
+`xcodebuild test` will fail with "The test runner hung before establishing connection" if a previous Xcode debug-launched `Meeting.app` is still alive (visible at `~/Library/Developer/Xcode/DerivedData/.../Meeting.app/...` in `ps`). The host bundle can't establish XCTest IPC because another instance has the bundle ID. Run `pkill -9 -f "Meeting.app"` before re-running tests, or stop the previous Xcode run cleanly.
+
+### Library file-system watcher and unit tests
+
+`MeetingsLibrary` watches `~/Documents/Meetings/` via `DispatchSourceFileSystemObject`. Initial scan + watcher registration are deliberately deferred to the next runloop in init via `Task { @MainActor … }`. Without this delay, init-time disk I/O fights with the XCTest runner's IPC handshake and tests sometimes hang. The dispatch source's event handler closure is `@Sendable () -> Void` but we set `queue: .main`, so we use `MainActor.assumeIsolated { … }` to call back into the MainActor-bound store.
 
 ### XcodeGen pitfalls
 

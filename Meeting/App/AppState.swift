@@ -11,13 +11,26 @@ final class AppState: ObservableObject {
     let transcribe: TranscriptionSession
     let library: MeetingsLibrary
     let toast: ToastPresenter
+    let llm: LLMProvider
     @Published private(set) var permissions = PermissionStatus()
+    @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
+
+    /// Per-meeting summary generation status — keyed by MeetingRecord.id
+    /// so Library detail and Transcript viewer can show a spinner /
+    /// surfaced error inline without juggling local state.
+    @Published private(set) var summaryGeneration: [MeetingRecord.ID: SummaryGenerationState] = [:]
 
     init() {
         self.recording = RecordingSession()
         self.transcribe = TranscriptionSession(provider: LocalProvider())
         self.library = MeetingsLibrary()
         self.toast = ToastPresenter()
+        self.llm = ClaudeCLIProvider()
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.llmAvailability = await self.llm.availability()
+        }
     }
 
     func refreshPermissions() async {
@@ -64,4 +77,28 @@ final class AppState: ObservableObject {
         let m = (total / 60) % 60
         return h > 0 ? "\(h)h \(m)m" : "\(m)m"
     }
+
+    /// Generate (or refresh) the AI summary for a meeting via the LLM
+    /// provider. Pipes the meeting's transcript through Claude CLI,
+    /// caches the result to summary.json, and re-publishes via
+    /// `summaryGeneration` so any view watching the meeting picks up
+    /// the new state.
+    func generateSummary(for meeting: MeetingRecord) async {
+        summaryGeneration[meeting.id] = .running
+        do {
+            let merged = try MergedTranscript.read(from: meeting.folder)
+            let summary = try await llm.generateSummary(transcript: merged)
+            try summary.write(to: meeting.folder)
+            summaryGeneration[meeting.id] = .done(summary)
+            library.rescan()
+        } catch {
+            summaryGeneration[meeting.id] = .failed(error.localizedDescription)
+        }
+    }
+}
+
+enum SummaryGenerationState: Equatable {
+    case running
+    case done(Summary)
+    case failed(String)
 }

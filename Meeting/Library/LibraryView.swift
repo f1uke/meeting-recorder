@@ -490,13 +490,14 @@ private struct LibraryDetail: View {
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 22) {
                             DetailHero(meeting: meeting)
+                            AISummarySection(meeting: meeting)
+                            ActionItemsSection(meeting: meeting)
                             if !meeting.speakers.isEmpty {
                                 SpeakersStrip(meeting: meeting)
                             }
                             if !meeting.marks.isEmpty {
                                 DetailMomentsList(meeting: meeting)
                             }
-                            // AI Summary card + Action items list arrive in U8b.
                         }
                         .padding(.horizontal, 28)
                         .padding(.top, 20)
@@ -512,8 +513,23 @@ private struct LibraryDetail: View {
 
 private struct DetailToolbar: View {
     let meeting: MeetingRecord
+    @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var library: MeetingsLibrary
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("dev.fluke.meeting.summaryDisclosureSeen") private var disclosureSeen = false
+    @State private var showDisclosure = false
+
+    private var summaryEnabled: Bool {
+        meeting.hasTranscript && appState.llmAvailability == .available
+    }
+
+    private func generateOrRegenerate() async {
+        if !disclosureSeen {
+            showDisclosure = true
+            return
+        }
+        await appState.generateSummary(for: meeting)
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -524,10 +540,13 @@ private struct DetailToolbar: View {
             .disabled(!meeting.hasTranscript)
 
             ToolbarButton(icon: "sparkles", label: "Summary") {
-                // U8b lights this up.
+                Task { await generateOrRegenerate() }
             }
-            .disabled(true)
-            .help("Summary requires Claude Code — coming in U8b")
+            .disabled(!summaryEnabled)
+            .help(summaryEnabled
+                ? (meeting.summary == nil ? "Generate AI summary via Claude" : "Regenerate via Claude")
+                : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
+            )
 
             ToolbarButton(icon: "square.and.arrow.up", label: "Share") {
                 NSWorkspace.shared.activateFileViewerSelecting([meeting.folder])
@@ -549,6 +568,15 @@ private struct DetailToolbar: View {
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.black.opacity(0.06)).frame(height: 0.5)
+        }
+        .alert("Send transcript to Claude?", isPresented: $showDisclosure) {
+            Button("Cancel", role: .cancel) {}
+            Button("Continue") {
+                disclosureSeen = true
+                Task { await appState.generateSummary(for: meeting) }
+            }
+        } message: {
+            Text("AI summary uses your Claude Code installation to generate a summary and action items. The transcript will be sent to Claude. This is the only step that ever leaves your Mac — recording and transcription stay local.")
         }
     }
 
@@ -775,6 +803,214 @@ private struct EmptyDetailPlaceholder: View {
             Text("Pick one from the list to see its details")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.textFaint)
+        }
+    }
+}
+
+// =============================================================================
+// MARK: - AI Summary section (U8b — Claude CLI)
+// =============================================================================
+
+private struct AISummarySection: View {
+    let meeting: MeetingRecord
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        switch state {
+        case .running:
+            runningCard
+        case .failed(let message):
+            errorCard(message)
+        case .ready(let summary):
+            summaryCard(summary)
+        case .empty:
+            EmptyView()
+        }
+    }
+
+    private enum DisplayState {
+        case empty
+        case running
+        case failed(String)
+        case ready(Summary)
+    }
+
+    private var state: DisplayState {
+        if let live = appState.summaryGeneration[meeting.id] {
+            switch live {
+            case .running: return .running
+            case .failed(let msg): return .failed(msg)
+            case .done(let summary): return .ready(summary)
+            }
+        }
+        if let cached = meeting.summary { return .ready(cached) }
+        return .empty
+    }
+
+    private func summaryCard(_ summary: Summary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.brandAccentStrong)
+                SectionLabel(text: "Summary")
+                    .foregroundStyle(Color.brandAccentStrong)
+                Spacer()
+                Text("\(summary.providerName) · \(formattedDate(summary.generatedAt))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.textFaint)
+            }
+            Text(boldified(summary.summary))
+                .font(.system(size: 13.5))
+                .lineSpacing(4)
+                .foregroundStyle(Color.textPrimary.opacity(0.85))
+        }
+        .padding(16)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(LinearGradient(
+                    colors: [
+                        Color.brandAccent.opacity(0.10),
+                        Color(red: 0.85, green: 0.55, blue: 0.95).opacity(0.07),
+                    ],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                ))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.6), lineWidth: 0.5)
+                }
+        }
+    }
+
+    private var runningCard: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("Generating summary via Claude…")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.textDim)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.regularMaterial)
+        }
+    }
+
+    private func errorCard(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.warmMark)
+                Text("Summary failed").font(.system(size: 12, weight: .semibold))
+                Spacer()
+            }
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.textDim)
+                .lineLimit(4)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.warmMark.opacity(0.08))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Color.warmMark.opacity(0.3), lineWidth: 0.5)
+                }
+        }
+    }
+
+    private func formattedDate(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale.current
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: d)
+    }
+
+    /// Renders **bold** markdown spans inline. Falls back to plain text on
+    /// parse error.
+    private func boldified(_ s: String) -> AttributedString {
+        if let attr = try? AttributedString(markdown: s, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )) {
+            return attr
+        }
+        return AttributedString(s)
+    }
+}
+
+// =============================================================================
+// MARK: - Action items list
+// =============================================================================
+
+private struct ActionItemsSection: View {
+    let meeting: MeetingRecord
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        if let items = items, !items.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.textDim)
+                    SectionLabel(text: "Action items · \(items.count)")
+                }
+                VStack(spacing: 4) {
+                    ForEach(items) { item in
+                        ActionItemRow(item: item)
+                    }
+                }
+            }
+        }
+    }
+
+    private var items: [ActionItem]? {
+        if case let .done(summary) = appState.summaryGeneration[meeting.id] {
+            return summary.actionItems
+        }
+        return meeting.summary?.actionItems
+    }
+}
+
+private struct ActionItemRow: View {
+    let item: ActionItem
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .strokeBorder(Color.textFaint, lineWidth: 1.2)
+                .frame(width: 14, height: 14)
+            Text(item.speaker)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color.brandAccentStrong)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background {
+                    Capsule().fill(Color.brandAccent.opacity(0.18))
+                }
+            Text(item.text)
+                .font(.system(size: 12.5))
+                .foregroundStyle(Color.textPrimary)
+                .lineLimit(2)
+            Spacer(minLength: 6)
+            Text(item.timestamp)
+                .font(.system(size: 10, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(Color.textFaint)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background {
+            RoundedRectangle(cornerRadius: 9)
+                .fill(.regularMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9)
+                        .strokeBorder(Color.white.opacity(0.5), lineWidth: 0.5)
+                }
         }
     }
 }

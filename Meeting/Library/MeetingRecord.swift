@@ -39,6 +39,9 @@ struct MeetingRecord: Identifiable, Equatable, Hashable, Sendable {
     /// out detail-pane actions like "Open Transcript" or "Export".
     let hasTranscript: Bool
 
+    /// Cached LLM summary, loaded from `summary.json` if present.
+    let summary: Summary?
+
     var id: String { folder.lastPathComponent }
 }
 

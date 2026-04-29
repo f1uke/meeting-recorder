@@ -170,6 +170,9 @@ final class MeetingsLibrary: ObservableObject {
         // Parse marks.json (optional — older meetings predate U4).
         let marks = (try? MarksFile.read(from: folder).marks) ?? []
 
+        // Load cached LLM summary if previously generated (U8b).
+        let summary = try? Summary.read(from: folder)
+
         let title = override?.title ?? folderTitle(folderName: folderName, date: date)
 
         return MeetingRecord(
@@ -184,7 +187,8 @@ final class MeetingsLibrary: ObservableObject {
             tags: override?.tags ?? [],
             starred: override?.starred ?? false,
             marks: marks,
-            hasTranscript: hasTranscript
+            hasTranscript: hasTranscript,
+            summary: summary
         )
     }
 
