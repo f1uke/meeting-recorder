@@ -33,22 +33,13 @@ struct PopoverIdleView: View {
 
             SpeakerCountChip(selection: $prefs.expectedSpeakerCount)
 
-            HStack(spacing: 10) {
-                GlassButton(style: .accent, action: startRecording) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "record.circle.fill")
-                        Text("Start Recording")
-                    }
-                }
-                .disabled(picker.selectedWindow == nil)
-
-                GlassIconButton(
-                    systemImage: "arrow.up.left.and.arrow.down.right",
-                    size: 38
-                ) {
-                    openWindow(id: "recording")
+            GlassButton(style: .accent, action: startRecording) {
+                HStack(spacing: 6) {
+                    Image(systemName: "record.circle.fill")
+                    Text("Start Recording")
                 }
             }
+            .disabled(picker.selectedWindow == nil)
 
             if let error = recording.errorMessage {
                 ErrorBanner(message: error)
@@ -108,7 +99,6 @@ struct PopoverRecordingView: View {
     let started: Date
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var recording: RecordingSession
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -151,22 +141,14 @@ struct PopoverRecordingView: View {
                 onMark: { recording.mark() }
             )
 
-            HStack(spacing: 8) {
-                GlassIconButton(
-                    systemImage: "arrow.up.left.and.arrow.down.right",
-                    size: 38
-                ) {
-                    openWindow(id: "recording")
+            GlassButton(style: .danger, action: stopAndTranscribe) {
+                HStack(spacing: 6) {
+                    Image(systemName: "stop.fill")
+                    Text("Stop & Transcribe")
+                    Text("⌘.").font(.mono(10)).opacity(0.7)
                 }
-                GlassButton(style: .danger, action: stopAndTranscribe) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "stop.fill")
-                        Text("Stop & Transcribe")
-                        Text("⌘.").font(.mono(10)).opacity(0.7)
-                    }
-                }
-                .keyboardShortcut(".", modifiers: .command)
             }
+            .keyboardShortcut(".", modifiers: .command)
         }
     }
 

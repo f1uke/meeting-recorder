@@ -28,12 +28,6 @@ struct MeetingApp: App {
                 .appEnvironment(appState)
         }
 
-        Window("Recording", id: "recording") {
-            RecordingWindowView()
-                .appEnvironment(appState)
-        }
-        .windowResizability(.contentSize)
-
         Window("Transcript", id: "transcript") {
             TranscriptViewerView()
                 .appEnvironment(appState)
