@@ -17,6 +17,50 @@ struct MergedTranscript: Codable, Sendable {
     let speakers: [Speaker]
 }
 
+extension MergedTranscript {
+    /// Read transcript.json from the meeting folder.
+    static func read(from folder: URL) throws -> MergedTranscript {
+        let url = folder.appendingPathComponent("transcript.json")
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(MergedTranscript.self, from: data)
+    }
+
+    /// Atomically rewrite transcript.json after an in-app edit (segment
+    /// rephrasing, speaker rename if we ever decide to bake it into the
+    /// canonical transcript). For now speaker overrides live in
+    /// library.json; this writer is only used for segment-text edits.
+    func write(to folder: URL) throws {
+        let url = folder.appendingPathComponent("transcript.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(self).write(to: url, options: [.atomic])
+    }
+
+    /// Replace one segment's text in-place. Returns a new MergedTranscript
+    /// because segments are `let` to keep the type Sendable + Codable.
+    func updatingSegment(id: TranscriptSegment.ID, text: String) -> MergedTranscript {
+        let updated = segments.map { seg -> TranscriptSegment in
+            guard seg.id == id else { return seg }
+            return TranscriptSegment(
+                id: seg.id,
+                start: seg.start,
+                end: seg.end,
+                speaker: seg.speaker,
+                text: text,
+                source: seg.source
+            )
+        }
+        return MergedTranscript(
+            duration: duration,
+            language: language,
+            providers: providers,
+            segments: updated,
+            words: words,
+            speakers: speakers
+        )
+    }
+}
+
 enum TranscriptMerger {
     /// Merges mic + output transcripts into a single sorted timeline. Speakers
     /// from each result are collected; mic gets `Speaker(id: .me, name: "Me")`
