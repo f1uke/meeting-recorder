@@ -27,11 +27,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var labelHost: NSHostingView<MenuBarLabel>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Menu-bar-first app: no Dock icon, keep running after the last
+        // window is closed. The status item is the persistent surface.
+        NSApp.setActivationPolicy(.accessory)
         setUpStatusItem()
         if let state = AppDelegate.pendingState {
             attach(state: state)
             AppDelegate.pendingState = nil
         }
+    }
+
+    /// Closing all windows shouldn't terminate the app — the menu bar
+    /// item is still there and the user expects to reopen Library /
+    /// Transcript from it.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     private func setUpStatusItem() {
@@ -43,10 +53,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSymbolName: "mic.fill",
                 accessibilityDescription: "Meeting"
             )
-            button.action = #selector(togglePopover(_:))
+            button.action = #selector(handleStatusClick(_:))
             button.target = self
+            // Receive both buttons so we can route left → popover,
+            // right (or ctrl-click) → quit menu.
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         statusItem = item
+    }
+
+    @objc private func handleStatusClick(_ sender: AnyObject?) {
+        let isRightClick: Bool = {
+            guard let event = NSApp.currentEvent else { return false }
+            if event.type == .rightMouseUp { return true }
+            // Treat ctrl-click as right-click to match macOS conventions.
+            return event.type == .leftMouseUp && event.modifierFlags.contains(.control)
+        }()
+        if isRightClick {
+            showContextMenu()
+        } else {
+            togglePopover(sender)
+        }
+    }
+
+    private func showContextMenu() {
+        guard let statusItem else { return }
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(
+            title: "Quit Meeting",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        ))
+        // Attaching the menu and immediately performing a click makes
+        // NSStatusItem display it. Clearing the menu afterwards keeps
+        // left-click-toggles-popover working for the next interaction.
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
     }
 
     func attach(state: AppState) {

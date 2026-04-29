@@ -18,6 +18,12 @@ final class AppState: ObservableObject {
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
 
+    /// Which view the unified main window is showing. Library on launch;
+    /// switches to `.transcript` when the user opens a meeting from the
+    /// detail pane or a popover row, and back via the transcript view's
+    /// nav-rail back button / breadcrumb.
+    @Published var route: AppRoute = .library
+
     /// Per-meeting summary generation status — keyed by MeetingRecord.id
     /// so Library detail and Transcript viewer can show a spinner /
     /// surfaced error inline without juggling local state.
@@ -105,4 +111,15 @@ enum SummaryGenerationState: Equatable {
     case running
     case done(Summary)
     case failed(String)
+}
+
+/// Top-level route for the unified main window. Library is the default;
+/// `.transcript` swaps the layout to the viewer for the currently
+/// selected meeting (the meeting itself is read off
+/// `MeetingsLibrary.selectedMeeting`, so changing selection changes
+/// what the transcript view loads without us having to thread the
+/// MeetingRecord through the route).
+enum AppRoute: Equatable {
+    case library
+    case transcript
 }

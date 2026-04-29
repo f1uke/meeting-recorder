@@ -50,8 +50,7 @@ struct TranscriptViewerView: View {
 // =============================================================================
 
 private struct TranscriptNavRail: View {
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismissWindow) private var dismissWindow
+    @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -63,7 +62,7 @@ private struct TranscriptNavRail: View {
             VStack(spacing: 6) {
                 // Header gives traffic lights room.
                 Color.clear.frame(height: 36)
-                NavRailButton(icon: "list.bullet") { openWindow(id: "library") }
+                NavRailButton(icon: "list.bullet") { appState.route = .library }
                 NavRailButton(icon: "magnifyingglass", active: true) {}
                 NavRailButton(icon: "sparkles") {}
                 NavRailButton(icon: "flag.fill") {}
@@ -198,11 +197,13 @@ private struct TranscriptToolbar: View {
     let hitCount: Int?
     @Binding var search: String
     @FocusState private var searchFocused: Bool
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         HStack(spacing: 8) {
             HStack(spacing: 5) {
-                Text("Library")
+                Button("Library") { appState.route = .library }
+                    .buttonStyle(.plain)
                     .foregroundStyle(Color.textDim)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
@@ -803,7 +804,7 @@ private struct SegmentRow: View {
 // =============================================================================
 
 private struct EmptyTranscriptPlaceholder: View {
-    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         VStack(spacing: 14) {
@@ -818,7 +819,7 @@ private struct EmptyTranscriptPlaceholder: View {
                 .foregroundStyle(Color.textFaint)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
-            Button("Open Library") { openWindow(id: "library") }
+            Button("Open Library") { appState.route = .library }
                 .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

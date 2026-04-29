@@ -20,16 +20,11 @@ struct MeetingApp: App {
         // popover via NSStatusItem + NSPopover. See AppDelegate.swift
         // for why we can't use MenuBarExtra(.window) on macOS 26.
 
-        // Window scenes are openable on demand from the popover via
-        // `OpenWindowAction`. They use `id` so we can target each one
-        // explicitly with `openWindow(id: "library")` etc.
-        Window("Library", id: "library") {
-            LibraryView()
-                .appEnvironment(appState)
-        }
-
-        Window("Transcript", id: "transcript") {
-            TranscriptViewerView()
+        // Single unified window. Routes between library + transcript
+        // are driven by `AppState.route` so navigation feels like
+        // moving deeper into the same surface (matches the design).
+        Window("Meetings", id: "main") {
+            RootView()
                 .appEnvironment(appState)
         }
         .commands {

@@ -367,8 +367,8 @@ private struct MeetingRow: View {
     let meeting: MeetingRecord
     let isSelected: Bool
     let onSelect: () -> Void
-    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var library: MeetingsLibrary
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         Button(action: onSelect) {
@@ -419,7 +419,7 @@ private struct MeetingRow: View {
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
                 library.selection = meeting.id
-                openWindow(id: "transcript")
+                appState.route = .transcript
             }
         )
     }
@@ -541,7 +541,7 @@ private struct DetailToolbar: View {
         HStack(spacing: 8) {
             Spacer()
             ToolbarButton(icon: "play.fill", label: "Open Transcript") {
-                openWindow(id: "transcript")
+                appState.route = .transcript
             }
             .disabled(!meeting.hasTranscript)
 

@@ -21,7 +21,8 @@ struct PopoverIdleView: View {
                 subtitle: "Ready to record",
                 trailing: {
                     GlassIconButton(systemImage: "books.vertical", size: 26) {
-                        openWindow(id: "library")
+                        appState.route = .library
+                        openWindow(id: "main")
                     }
                 }
             )
@@ -46,7 +47,8 @@ struct PopoverIdleView: View {
             }
 
             RecentSection {
-                openWindow(id: "library")
+                appState.route = .library
+                openWindow(id: "main")
             }
         }
         .task {
@@ -445,6 +447,7 @@ struct SpeakerCountChip: View {
 
 struct RecentSection: View {
     @EnvironmentObject private var library: MeetingsLibrary
+    @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
     let openLibrary: () -> Void
 
@@ -479,7 +482,8 @@ struct RecentSection: View {
                     ForEach(library.recent) { meeting in
                         Button {
                             library.selection = meeting.id
-                            openWindow(id: "library")
+                            appState.route = .transcript
+                            openWindow(id: "main")
                         } label: {
                             HStack(spacing: 8) {
                                 Circle()
