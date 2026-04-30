@@ -107,6 +107,15 @@ struct TranscriptionOptions: Sendable {
     }
 }
 
+/// One audio stream tied to its options. Used as the input shape of
+/// `transcribeBatch(...)` so providers that benefit from bundling
+/// (Gemini Batch API) can route every stream's chunks through one
+/// server-side job.
+struct TranscribeStream: Sendable {
+    let audioURL: URL
+    let options: TranscriptionOptions
+}
+
 protocol TranscriptionProvider: Sendable {
     /// Display name for Settings + transcript metadata.
     var name: String { get }
@@ -120,6 +129,17 @@ protocol TranscriptionProvider: Sendable {
         options: TranscriptionOptions,
         progress: (@Sendable (Double) -> Void)?
     ) async throws -> TranscriptResult
+    /// Transcribe several streams together. The default extension impl
+    /// runs them sequentially via `transcribe(...)` — a behavior-preserving
+    /// fallback for local engines and synchronous cloud paths. Providers
+    /// that can do better (e.g. GeminiProvider with Batch API on, where
+    /// every stream's chunks go into one batch job) override this directly.
+    /// Returns a dictionary keyed by `audioURL` so callers don't need to
+    /// reason about input ordering.
+    func transcribeBatch(
+        streams: [TranscribeStream],
+        progress: (@Sendable (Double) -> Void)?
+    ) async throws -> [URL: TranscriptResult]
     /// Release any loaded model weights from memory. Called by the session
     /// after a transcript completes so the multi-GB CoreML buffers don't sit
     /// resident for the rest of the app's lifetime.
@@ -130,6 +150,30 @@ extension TranscriptionProvider {
     func unloadModels() async {}
     func transcribe(audioURL: URL, options: TranscriptionOptions) async throws -> TranscriptResult {
         try await transcribe(audioURL: audioURL, options: options, progress: nil)
+    }
+
+    /// Default `transcribeBatch` — sequential `transcribe()` per stream.
+    /// Slices the caller's progress band evenly across streams so the bar
+    /// keeps moving regardless of stream count.
+    func transcribeBatch(
+        streams: [TranscribeStream],
+        progress: (@Sendable (Double) -> Void)?
+    ) async throws -> [URL: TranscriptResult] {
+        var results: [URL: TranscriptResult] = [:]
+        let total = Double(max(streams.count, 1))
+        for (i, stream) in streams.enumerated() {
+            let bandStart = Double(i) / total
+            let bandSize = 1.0 / total
+            let result = try await transcribe(
+                audioURL: stream.audioURL,
+                options: stream.options,
+                progress: { f in
+                    progress?(bandStart + max(0, min(1, f)) * bandSize)
+                }
+            )
+            results[stream.audioURL] = result
+        }
+        return results
     }
 }
 

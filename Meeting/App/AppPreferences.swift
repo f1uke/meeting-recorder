@@ -57,6 +57,16 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(geminiModel.rawValue, forKey: Keys.geminiModel) }
     }
 
+    /// Submit chunks via Gemini's Batch API instead of synchronous
+    /// `generateContent` calls. Halves token cost (Google charges 50% for
+    /// batch) at the cost of latency — batches usually complete in a few
+    /// minutes but the SLA is 24 h, and the app must stay open until the
+    /// poll loop sees `BATCH_STATE_SUCCEEDED`. Off by default so existing
+    /// users see no behavior change.
+    @Published var geminiUseBatchAPI: Bool {
+        didSet { UserDefaults.standard.set(geminiUseBatchAPI, forKey: Keys.geminiUseBatchAPI) }
+    }
+
     /// OpenAI API key (plaintext in UserDefaults — TODO Keychain).
     @Published var openaiAPIKey: String {
         didSet { UserDefaults.standard.set(openaiAPIKey, forKey: Keys.openaiAPIKey) }
@@ -127,6 +137,7 @@ final class AppPreferences: ObservableObject {
         self.geminiModel = GeminiModel(
             rawValue: UserDefaults.standard.string(forKey: Keys.geminiModel) ?? ""
         ) ?? .pro
+        self.geminiUseBatchAPI = UserDefaults.standard.bool(forKey: Keys.geminiUseBatchAPI)
         self.openaiAPIKey = UserDefaults.standard.string(forKey: Keys.openaiAPIKey) ?? ""
         self.openaiModel = OpenAIModel(
             rawValue: UserDefaults.standard.string(forKey: Keys.openaiModel) ?? ""
@@ -173,6 +184,7 @@ final class AppPreferences: ObservableObject {
         static let transcriptionGlossary = "dev.fluke.meeting.transcriptionGlossary"
         static let geminiAPIKey = "dev.fluke.meeting.geminiAPIKey"
         static let geminiModel = "dev.fluke.meeting.geminiModel"
+        static let geminiUseBatchAPI = "dev.fluke.meeting.geminiUseBatchAPI"
         static let openaiAPIKey = "dev.fluke.meeting.openaiAPIKey"
         static let openaiModel = "dev.fluke.meeting.openaiModel"
         static let showMenuBarTimer = "dev.fluke.meeting.showMenuBarTimer"

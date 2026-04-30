@@ -8,7 +8,7 @@ import Combine
 @MainActor
 final class AppState: ObservableObject {
     let recording: RecordingSession
-    let transcribe: TranscriptionSession
+    let queue: TranscriptionQueue
     let library: MeetingsLibrary
     let toast: ToastPresenter
     let llm: LLMProvider
@@ -39,9 +39,15 @@ final class AppState: ObservableObject {
 
     init() {
         self.recording = RecordingSession()
-        self.transcribe = TranscriptionSession(provider: Self.makeProvider())
-        self.library = MeetingsLibrary()
-        self.toast = ToastPresenter()
+        let library = MeetingsLibrary()
+        self.library = library
+        let toast = ToastPresenter()
+        self.toast = toast
+        self.queue = TranscriptionQueue(
+            providerFactory: { Self.makeProviderSnapshot() },
+            library: library,
+            toast: toast
+        )
         self.llm = ClaudeCLIProvider()
         self.picker = WindowPickerModel()
         self.calendar = CalendarStore()
@@ -57,34 +63,44 @@ final class AppState: ObservableObject {
             if self.calendar.authorization == .authorized {
                 await self.notifier.requestAuthorizationIfNeeded()
             }
+            // Resume any transcription jobs that died with the previous
+            // app process. Library scan is async (runloop-deferred) so we
+            // wait one tick to give it a chance to populate first; the
+            // queue scan only relies on disk markers, not the in-memory
+            // index, so the order isn't strictly required for correctness.
+            self.queue.scanAndEnqueueOrphans(meetingsRoot: Self.meetingsRoot)
         }
     }
 
-    /// Replace the underlying transcription provider — called when the
-    /// user picks a different Whisper model, switches engine, or edits
-    /// the cloud API key / glossary in Settings. Cheap to do (model load
-    /// is lazy on first transcribe), but no-ops mid-run so we don't yank
-    /// a provider out from under an in-flight job.
+    /// Hook for Settings change notifications. Each new transcription job
+    /// builds its own provider via `providerFactory` at enqueue time, so
+    /// settings changes simply take effect on the next enqueue — no
+    /// in-flight job gets its provider yanked. This shim exists for
+    /// API-call-sites in SettingsView; nothing concrete needs to happen.
     func applyTranscriptionProviderChange() {
-        if case .running = transcribe.state { return }
-        transcribe.replaceProvider(Self.makeProvider())
+        // Intentionally empty — see doc comment.
     }
 
-    /// Build the active provider from current preferences. Called from
-    /// init and any settings change that affects provider construction.
-    private static func makeProvider() -> TranscriptionProvider {
+    /// Build a provider + descriptive name/model from current preferences.
+    /// Captured per-job so concurrent enqueues during a settings change
+    /// each see a consistent snapshot.
+    private static func makeProviderSnapshot() -> TranscriptionQueue.ProviderSnapshot {
         let prefs = AppPreferences.shared
         switch prefs.transcriptionEngine {
         case .local:
-            return LocalProvider(modelVariant: prefs.modelVariant.rawValue)
+            let p = LocalProvider(modelVariant: prefs.modelVariant.rawValue)
+            return (provider: p, name: "Local WhisperKit", model: prefs.modelVariant.rawValue)
         case .gemini:
-            return GeminiProvider(
+            let p = GeminiProvider(
                 apiKey: prefs.geminiAPIKey,
                 glossary: prefs.transcriptionGlossary,
-                modelName: prefs.geminiModel.rawValue
+                modelName: prefs.geminiModel.rawValue,
+                useBatchAPI: prefs.geminiUseBatchAPI
             )
+            let suffix = prefs.geminiUseBatchAPI ? " (batch)" : ""
+            return (provider: p, name: "Gemini\(suffix)", model: prefs.geminiModel.rawValue)
         case .openai:
-            return OpenAIProvider(
+            let p = OpenAIProvider(
                 apiKey: prefs.openaiAPIKey,
                 glossary: prefs.transcriptionGlossary,
                 modelName: prefs.openaiModel.rawValue,
@@ -92,7 +108,14 @@ final class AppState: ObservableObject {
                 chunkDuration: prefs.openaiModel.chunkDuration,
                 supportsNativeDiarization: prefs.openaiModel.supportsNativeDiarization
             )
+            return (provider: p, name: "OpenAI", model: prefs.openaiModel.rawValue)
         }
+    }
+
+    private static var meetingsRoot: URL {
+        FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Meetings", isDirectory: true)
     }
 
     func refreshPermissions() async {
@@ -139,32 +162,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Stop the active recording and immediately kick off transcription on
-    /// the resulting folder. Used by both the popover and the expanded
-    /// Recording window so the post-stop flow stays consistent.
+    /// Stop the active recording and enqueue transcription. Returns
+    /// immediately so the user can start another recording while the
+    /// transcript runs in the background; the toast and Library row pick
+    /// up completion later.
     func stopAndTranscribe() async {
         await recording.stop()
         guard let folder = recording.lastFolder else { return }
         // Pick up the new folder before transcription writes its JSON, so
         // the Library shows the recording immediately.
         library.rescan()
-        await transcribe.run(
+        queue.enqueue(
             meetingFolder: folder,
             expectedSpeakers: AppPreferences.shared.expectedSpeakerCount.pyannoteValue
         )
-        // Re-read after transcript.json lands so duration / speakers fill in.
-        library.rescan()
-
-        // Surface a "Transcript ready" toast on success so the user sees
-        // completion even if they've moved on to another app.
-        if case .done = transcribe.state, let record = library.meetings.first(where: { $0.folder == folder }) {
-            toast.showTranscriptReady(
-                meetingTitle: record.title,
-                durationText: formatDuration(record.duration),
-                speakerCount: record.speakerCount,
-                folder: folder
-            )
-        }
     }
 
     private func formatDuration(_ d: TimeInterval?) -> String {
@@ -176,31 +187,14 @@ final class AppState: ObservableObject {
     }
 
     /// Re-run transcription on an existing meeting folder. Overwrites
-    /// `transcript.{json,md,srt}` in place — any inline segment edits made
-    /// in the Transcript Viewer are lost, so callers should confirm with
-    /// the user first. Reuses the same `TranscriptionSession` as the
-    /// post-recording flow, so progress shows in the menu-bar popover.
+    /// `transcript.{json,md,srt}` in place when the job completes — any
+    /// inline segment edits made in the Transcript Viewer are lost, so
+    /// callers should confirm with the user first.
     func retranscribe(_ meeting: MeetingRecord) async {
-        // Don't stomp on an already-running transcription (e.g. just
-        // finished a recording). The button should be disabled in this
-        // state, but the guard is cheap insurance.
-        if case .running = transcribe.state { return }
-
-        await transcribe.run(
+        queue.enqueue(
             meetingFolder: meeting.folder,
             expectedSpeakers: AppPreferences.shared.expectedSpeakerCount.pyannoteValue
         )
-        library.rescan()
-
-        if case .done = transcribe.state,
-           let record = library.meetings.first(where: { $0.folder == meeting.folder }) {
-            toast.showTranscriptReady(
-                meetingTitle: record.title,
-                durationText: formatDuration(record.duration),
-                speakerCount: record.speakerCount,
-                folder: meeting.folder
-            )
-        }
     }
 
     /// Generate (or refresh) the AI summary for a meeting via the LLM

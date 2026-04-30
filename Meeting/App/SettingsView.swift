@@ -449,6 +449,18 @@ private struct TranscriptionTab: View {
                             }
                         )
                     )
+                    Divider().opacity(0.4)
+                    ToggleRow(
+                        title: "Use Batch API (50% cheaper, slower)",
+                        description: "Submits all chunks as one batch job instead of individual calls. Google charges half as much, but batches typically take a few minutes — and up to 24 h — to finish. Keep the app open until transcription completes.",
+                        isOn: Binding(
+                            get: { prefs.geminiUseBatchAPI },
+                            set: { newValue in
+                                prefs.geminiUseBatchAPI = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        )
+                    )
                 }
 
             case .openai:

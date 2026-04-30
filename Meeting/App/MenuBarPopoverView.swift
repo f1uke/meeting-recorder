@@ -1,15 +1,19 @@
 import SwiftUI
 
-/// The body of the menu-bar popover. Routes to one of five surfaces
-/// depending on the combined `(permissions, recording, transcribe)` state:
+/// The body of the menu-bar popover. Routes between three surfaces:
 ///
-///   permission-gate → idle → recording → transcribing → done / failed
+///   permission-gate → idle → recording
+///
+/// Transcription is no longer a routed state — it runs in the background
+/// via `TranscriptionQueue` and surfaces inside the idle view as a small
+/// status card. After "Stop & Transcribe" the popover returns straight
+/// to idle so the user can start the next recording while the previous
+/// transcript is still processing.
 ///
 /// Width is fixed at 360pt; height adapts to whichever sub-view is showing.
 struct MenuBarPopoverView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var recording: RecordingSession
-    @EnvironmentObject private var transcribe: TranscriptionSession
 
     var body: some View {
         Group {
@@ -17,23 +21,17 @@ struct MenuBarPopoverView: View {
                 PermissionView()
                     .padding(8)
             } else {
-                switch (recording.state, transcribe.state) {
-                case let (.recording(folder, started), _):
+                switch recording.state {
+                case let .recording(folder, started):
                     PopoverRecordingView(folder: folder, started: started)
-                case (.starting, _):
+                case .starting:
                     PopoverTransientView(
                         label: "เริ่มบันทึก…",
                         hint: "ถ้าค้างนาน อาจมี macOS TCC dialog ซ่อนอยู่ — กด Cancel เพื่อย้อนกลับ",
                         onCancel: { recording.cancelStart() }
                     )
-                case (.stopping, _):
+                case .stopping:
                     PopoverTransientView(label: "หยุดบันทึก…")
-                case let (_, .running(stage, overall)):
-                    PopoverTranscribingView(stage: stage, overall: overall)
-                case let (_, .done(url)):
-                    PopoverDoneView(transcriptURL: url) { transcribe.dismiss() }
-                case let (_, .failed(message)):
-                    PopoverFailedView(message: message) { transcribe.dismiss() }
                 default:
                     PopoverIdleView()
                 }

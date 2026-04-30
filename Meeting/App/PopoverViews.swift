@@ -42,6 +42,8 @@ struct PopoverIdleView: View {
                 }
             )
 
+            BackgroundJobsCard()
+
             calendarSection
 
             VStack(alignment: .leading, spacing: 6) {
@@ -438,184 +440,129 @@ struct PopoverTransientView: View {
 }
 
 // =============================================================================
-// MARK: - Transcribing state
+// MARK: - Background jobs card (idle-view inset)
 // =============================================================================
 
-struct PopoverTranscribingView: View {
-    let stage: TranscriptionSession.Stage
-    /// Pre-weighted overall pipeline progress in 0...1, fed by
-    /// `TranscriptionSession`. Animated so the bar slides smoothly between
-    /// poll ticks rather than stepping.
-    let overall: Double
-    @ObservedObject private var prefs = AppPreferences.shared
+/// Small status block that appears at the top of the popover idle view
+/// whenever the transcription queue has work in flight. Click to open the
+/// Library and select the running meeting.
+struct BackgroundJobsCard: View {
+    @EnvironmentObject private var queue: TranscriptionQueue
+    @EnvironmentObject private var library: MeetingsLibrary
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.openWindow) private var openWindow
 
-    /// Privacy/network footprint footer that depends on the active engine.
-    /// Local: stays on-device. Cloud: text leaves the device, but speaker
-    /// embeddings (SpeakerKit diarization) still run locally.
-    private var footnote: String {
-        switch prefs.transcriptionEngine {
-        case .local:
-            return "Running locally on your Mac. No data leaves the device."
-        case .gemini:
-            return "Sending audio to Google Gemini for text. Diarization stays on this Mac."
-        case .openai:
-            return "Sending audio to OpenAI for text. Diarization stays on this Mac."
+    var body: some View {
+        if let running = queue.runningJob {
+            content(running: running)
+        } else if queue.activeCount > 0 {
+            // Edge case: nothing running but jobs queued (worker hop in
+            // progress). Show a generic "queued" message so the indicator
+            // doesn't disappear and reappear.
+            queuedOnlyContent
         }
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            PopoverHeader(
-                title: "Transcribing",
-                subtitle: stage.localizedName,
-                trailing: { EmptyView() }
-            )
-
-            GlassCard {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text(stageDisplayLabel)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color.textPrimary)
-                        Spacer()
-                        Text(percentText)
-                            .font(.mono(12))
-                            .foregroundStyle(Color.textDim)
-                    }
-
-                    GeometryReader { proxy in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.primary.opacity(0.08))
-                            Capsule()
-                                .fill(LinearGradient(
-                                    colors: [Color.brandAccent, Color.brandAccent.opacity(0.7)],
-                                    startPoint: .leading, endPoint: .trailing
-                                ))
-                                .frame(width: proxy.size.width * clampedOverall)
-                                .animation(.easeOut(duration: 0.25), value: clampedOverall)
-                        }
-                    }
-                    .frame(height: 6)
-
-                    HStack(spacing: 6) {
-                        ForEach(TranscriptionSession.Stage.pipeline, id: \.self) { s in
-                            Capsule()
-                                .fill(stripeColor(for: s))
-                                .frame(height: 4)
-                        }
-                    }
-
-                    Text(footnote)
-                        .font(.system(size: 11))
+    @ViewBuilder
+    private func content(running: TranscriptionJob) -> some View {
+        let title = library.meetings.first(where: { $0.folder == running.meetingFolder })?.title
+            ?? running.meetingFolder.lastPathComponent
+        Button(action: { openInLibrary(folder: running.meetingFolder) }) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.brandAccent)
+                    Text("Transcribing")
+                        .font(.system(size: 11, weight: .bold))
+                        .kerning(0.6)
+                        .foregroundStyle(Color.brandAccent)
+                    Spacer()
+                    Text(percentText(for: running))
+                        .font(.mono(11))
                         .foregroundStyle(Color.textDim)
                 }
-                .padding(Tokens.cardPadding)
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                ProgressBar(value: progressValue(for: running))
+                    .frame(height: 4)
+                if queue.queuedCount > 0 {
+                    Text("\(queue.queuedCount) queued")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.textFaint)
+                }
             }
+            .padding(10)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.regularMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.brandAccent.opacity(0.30), lineWidth: 0.5)
+                    }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var queuedOnlyContent: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("\(queue.activeCount) transcription\(queue.activeCount == 1 ? "" : "s") queued")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.textPrimary)
+            Spacer()
+        }
+        .padding(10)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.brandAccent.opacity(0.20), lineWidth: 0.5)
+                }
         }
     }
 
-    private var clampedOverall: Double {
-        max(0, min(1, overall))
+    private func progressValue(for job: TranscriptionJob) -> Double {
+        if case let .running(_, overall) = job.state { return overall }
+        return 0
     }
 
-    private var percentText: String {
-        "\(Int((clampedOverall * 100).rounded()))%"
+    private func percentText(for job: TranscriptionJob) -> String {
+        let pct = Int((progressValue(for: job) * 100).rounded())
+        return "\(pct)%"
     }
 
-    private var stageDisplayLabel: String {
-        switch stage {
-        case .loadingModels: return "Loading models"
-        case .transcribingMic: return "Mic transcription"
-        case .transcribingOutput: return "Output transcription"
-        case .merging: return "Diarization + merge"
-        case .writing: return "Writing transcript"
+    private func openInLibrary(folder: URL) {
+        if let record = library.meetings.first(where: { $0.folder == folder }) {
+            library.selection = record.id
         }
-    }
-
-    private func stripeColor(for s: TranscriptionSession.Stage) -> Color {
-        let order = TranscriptionSession.Stage.pipeline
-        guard let i = order.firstIndex(of: s),
-              let cur = order.firstIndex(of: stage) else {
-            return Color.primary.opacity(0.10)
-        }
-        if i < cur { return Color.brandAccent }
-        if i == cur { return Color.brandAccent.opacity(0.5) }
-        return Color.primary.opacity(0.10)
+        appState.route = .library
+        openWindow(id: "main")
     }
 }
 
-// =============================================================================
-// MARK: - Done / Failed
-// =============================================================================
-
-struct PopoverDoneView: View {
-    let transcriptURL: URL
-    let onDismiss: () -> Void
+private struct ProgressBar: View {
+    let value: Double  // 0...1
 
     var body: some View {
-        VStack(spacing: 14) {
-            ZStack {
-                Circle()
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.10))
+                Capsule()
                     .fill(LinearGradient(
-                        colors: [Color.brandSuccess, Color.brandSuccess.opacity(0.7)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
+                        colors: [Color.brandAccent, Color.brandAccent.opacity(0.7)],
+                        startPoint: .leading, endPoint: .trailing
                     ))
-                    .frame(width: 44, height: 44)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .shadow(color: Color.brandSuccess.opacity(0.4), radius: 8, y: 3)
-
-            Text("Transcript ready")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.textPrimary)
-
-            Text(transcriptURL.deletingLastPathComponent().lastPathComponent)
-                .font(.mono(11))
-                .foregroundStyle(Color.textDim)
-
-            HStack(spacing: 8) {
-                GlassButton(style: .accent, action: openInDefault) {
-                    Text("Open Markdown")
-                }
-                GlassButton(style: .neutral, action: onDismiss) {
-                    Text("Done")
-                }
+                    .frame(width: proxy.size.width * max(0, min(1, value)))
+                    .animation(.easeOut(duration: 0.25), value: value)
             }
         }
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity)
-    }
-
-    private func openInDefault() {
-        NSWorkspace.shared.open(transcriptURL)
-    }
-}
-
-struct PopoverFailedView: View {
-    let message: String
-    let onDismiss: () -> Void
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 32))
-                .foregroundStyle(Color.warmMark)
-            Text("Transcription failed")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.textPrimary)
-            Text(message)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.textDim)
-                .multilineTextAlignment(.center)
-                .lineLimit(4)
-            GlassButton(style: .accent, action: onDismiss) {
-                Text("Back")
-            }
-        }
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity)
     }
 }
 
@@ -904,13 +851,3 @@ struct BookmarksChip: View {
     }
 }
 
-// =============================================================================
-// MARK: - TranscriptionSession.Stage helpers
-// =============================================================================
-
-extension TranscriptionSession.Stage {
-    /// Linear ordering used by the popover progress bar / pipeline strip.
-    static let pipeline: [TranscriptionSession.Stage] = [
-        .loadingModels, .transcribingMic, .transcribingOutput, .merging, .writing,
-    ]
-}

@@ -60,6 +60,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         false
     }
 
+    /// Warn before quitting if there are queued or running transcription
+    /// jobs. Quitting kills in-flight transcription work — the user
+    /// usually wants to know that's about to happen. Failed/cancelled
+    /// jobs don't trigger the prompt; they're already terminal.
+    ///
+    /// We leave the pending-marker on disk so the next launch can resume
+    /// any job that was running when the user confirms quit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let state = attachedState, state.queue.activeCount > 0 else {
+            return .terminateNow
+        }
+        let active = state.queue.activeCount
+        let alert = NSAlert()
+        alert.messageText = "Quit while transcribing?"
+        alert.informativeText = active == 1
+            ? "1 transcription is still in progress. Quitting now will stop it. Meeting will resume it on next launch."
+            : "\(active) transcriptions are still in progress. Quitting now will stop them. Meeting will resume them on next launch."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Keep Running")
+        let response = alert.runModal()
+        return response == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
+    /// Reference to the attached `AppState`, kept around so the quit
+    /// handler can ask the queue whether anything's in flight.
+    private weak var attachedState: AppState?
+
     private func setUpStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
@@ -111,11 +139,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func attach(state: AppState) {
         guard let statusItem else { return }
 
+        attachedState = state
+
         // 1. Swap the placeholder icon for the SwiftUI MenuBarLabel.
         if let button = statusItem.button {
             let label = MenuBarLabel(
                 recording: state.recording,
-                transcribe: state.transcribe
+                queue: state.queue
             )
             let host = NSHostingView(rootView: label)
             host.translatesAutoresizingMaskIntoConstraints = false
@@ -136,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // status bar button stays the width it had at attach time and
         // clips wider content (e.g. "0:00" timer next to the red dot).
         labelObservers.removeAll()
-        Publishers.CombineLatest(state.recording.$state, state.transcribe.$state)
+        Publishers.CombineLatest(state.recording.$state, state.queue.$jobs)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.refreshStatusItemWidth()

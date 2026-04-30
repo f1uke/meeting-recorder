@@ -9,11 +9,11 @@ import SwiftUI
 /// safe. Custom shaders / complex hierarchies may not render.
 struct MenuBarLabel: View {
     @ObservedObject var recording: RecordingSession
-    @ObservedObject var transcribe: TranscriptionSession
+    @ObservedObject var queue: TranscriptionQueue
     @ObservedObject private var prefs = AppPreferences.shared
 
     var body: some View {
-        switch (recording.state, transcribe.state) {
+        switch (recording.state, queue.activeCount) {
         case let (.recording(_, started), _):
             HStack(spacing: 4) {
                 Image(systemName: "circle.fill")
@@ -30,10 +30,14 @@ struct MenuBarLabel: View {
             }
             .font(.system(size: 13))
 
-        case (_, .running):
+        case (_, let active) where active > 0:
             HStack(spacing: 3) {
                 Image(systemName: "waveform")
-                Text("…").font(.system(size: 13, weight: .medium))
+                if active > 1 {
+                    Text("\(active)").font(.system(size: 13, weight: .medium))
+                } else {
+                    Text("…").font(.system(size: 13, weight: .medium))
+                }
             }
             .font(.system(size: 13))
 

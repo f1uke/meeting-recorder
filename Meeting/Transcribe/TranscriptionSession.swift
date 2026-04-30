@@ -1,25 +1,22 @@
 import Foundation
-import Combine
 
-/// Drives transcription for one finished recording. Runs the provider on
-/// mic.m4a (single speaker = "me") and output.m4a (with diarization), merges
-/// the two streams chronologically, and writes JSON / Markdown / SRT next to
-/// the audio in the meeting folder.
-@MainActor
-final class TranscriptionSession: ObservableObject {
-    enum State: Equatable {
-        case idle
-        /// `overall` is the pre-weighted pipeline progress in 0...1, so the UI
-        /// can drive a single bar without knowing about per-stage weights.
-        case running(stage: Stage, overall: Double)
-        case done(transcriptURL: URL)
-        case failed(message: String)
-    }
-
-    enum Stage: Equatable {
+/// Pipeline stages a transcription run progresses through. The actual
+/// orchestration lives in `TranscriptionQueue` now; this type only
+/// supplies the stage vocabulary + per-stage progress weights so the
+/// queue and the UI agree on how to interpret a 0...1 overall fraction.
+///
+/// Kept under `TranscriptionSession` as a namespace so existing call
+/// sites (popover progress bar, queue progress bands) don't churn.
+enum TranscriptionSession {
+    enum Stage: Equatable, Sendable {
         case loadingModels
         case transcribingMic
         case transcribingOutput
+        /// Used when both mic + output run in one combined call (e.g.
+        /// `GeminiProvider.transcribeCombinedBatch` pools every stream's
+        /// chunks into a single batch). Spans the full mic+output band so
+        /// the progress bar moves continuously through the long poll.
+        case transcribingBatch
         case merging
         case writing
 
@@ -28,6 +25,7 @@ final class TranscriptionSession: ObservableObject {
             case .loadingModels: "กำลังโหลดโมเดล…"
             case .transcribingMic: "ถอดเสียงไมค์…"
             case .transcribingOutput: "ถอดเสียง meeting + แยกผู้พูด…"
+            case .transcribingBatch: "ส่งงาน batch + แยกผู้พูด…"
             case .merging: "รวม timeline…"
             case .writing: "บันทึก transcript…"
             }
@@ -39,141 +37,18 @@ final class TranscriptionSession: ObservableObject {
         /// Whisper + SpeakerKit on the longer of the two streams.
         var progressRange: (start: Double, end: Double) {
             switch self {
-            case .loadingModels:     return (0.00, 0.02)
-            case .transcribingMic:   return (0.02, 0.40)
-            case .transcribingOutput:return (0.40, 0.95)
-            case .merging:           return (0.95, 0.97)
-            case .writing:           return (0.97, 1.00)
+            case .loadingModels:      return (0.00, 0.02)
+            case .transcribingMic:    return (0.02, 0.40)
+            case .transcribingOutput: return (0.40, 0.95)
+            case .transcribingBatch:  return (0.02, 0.95)
+            case .merging:            return (0.95, 0.97)
+            case .writing:            return (0.97, 1.00)
             }
         }
-    }
 
-    @Published private(set) var state: State = .idle
-    @Published private(set) var lastResult: MergedTranscript?
-
-    private var provider: TranscriptionProvider
-
-    init(provider: TranscriptionProvider) {
-        self.provider = provider
-    }
-
-    /// Hot-swap the provider when the user changes Whisper model variant.
-    /// Caller must check `state` is not `.running`; we additionally guard
-    /// here so a race with an in-flight run is at worst a no-op.
-    func replaceProvider(_ new: TranscriptionProvider) {
-        if case .running = state { return }
-        self.provider = new
-    }
-
-    /// Reset back to idle so the UI returns to the picker. Doesn't cancel a
-    /// running task — call this only after `done` or `failed`.
-    func dismiss() {
-        guard case .running = state else {
-            state = .idle
-            return
-        }
-    }
-
-    /// Run transcription on a finished meeting folder. Expects `mic.m4a` and
-    /// `output.m4a` to exist; produces `transcript.{json,md,srt}` alongside.
-    /// `expectedSpeakers` overrides pyannote's auto-detection when set —
-    /// pass `1` for solo recordings to suppress over-split.
-    func run(meetingFolder: URL, expectedSpeakers: Int? = nil) async {
-        enter(stage: .loadingModels, fraction: 0)
-
-        let micURL = meetingFolder.appendingPathComponent("mic.m4a")
-        let outputURL = meetingFolder.appendingPathComponent("output.m4a")
-
-        defer {
-            // Release WhisperKit + SpeakerKit so the multi-GB CoreML weights
-            // don't stay resident between recordings. Detached so we can
-            // return state to the UI without waiting on actor teardown.
-            let provider = self.provider
-            Task.detached { await provider.unloadModels() }
-        }
-
-        // Honor the user's language pref from Settings → General. `.auto`
-        // → `nil` so Whisper detects per chunk; an explicit choice forces
-        // Whisper into that language and avoids the Thai-as-English
-        // misclassification problem on the turbo variant.
-        let languageCode = AppPreferences.shared.transcriptionLanguage.whisperCode
-
-        // Pick up the mic gate sidecar (if MicGate ran during recording) so
-        // we can silence Whisper's input over Meet-muted intervals — kills
-        // the boilerplate hallucinations Whisper emits on echo / silence.
-        let micGateIntervals = MicGateFile.read(from: meetingFolder)?.muted
-
-        do {
-            enter(stage: .transcribingMic, fraction: 0)
-            let mic = try await provider.transcribe(
-                audioURL: micURL,
-                options: TranscriptionOptions(
-                    language: languageCode,
-                    withDiarization: false,
-                    knownSpeaker: .me,
-                    source: .mic,
-                    mutedIntervals: micGateIntervals,
-                    referenceAudioURL: outputURL,
-                    normalizeLoudness: true
-                ),
-                progress: makeProgressReporter(for: .transcribingMic)
-            )
-
-            enter(stage: .transcribingOutput, fraction: 0)
-            let output = try await provider.transcribe(
-                audioURL: outputURL,
-                options: TranscriptionOptions(
-                    language: languageCode,
-                    withDiarization: true,
-                    knownSpeaker: nil,
-                    source: .meetingOutput,
-                    expectedSpeakerCount: expectedSpeakers
-                ),
-                progress: makeProgressReporter(for: .transcribingOutput)
-            )
-
-            enter(stage: .merging, fraction: 1)
-            let merged = TranscriptMerger.merge(mic: mic, output: output)
-
-            enter(stage: .writing, fraction: 1)
-            try TranscriptExporter.writeAll(merged, in: meetingFolder)
-
-            lastResult = merged
-            state = .done(transcriptURL: meetingFolder.appendingPathComponent("transcript.md"))
-        } catch {
-            state = .failed(message: error.localizedDescription)
-        }
-    }
-
-    private func enter(stage: Stage, fraction: Double) {
-        let band = stage.progressRange
-        let clamped = max(0, min(1, fraction))
-        state = .running(
-            stage: stage,
-            overall: band.start + (band.end - band.start) * clamped
-        )
-    }
-
-    /// Build a `@Sendable` reporter that the provider can call from any
-    /// task — it hops back to the main actor and only republishes when
-    /// the overall fraction has shifted enough to be worth a re-render.
-    private nonisolated func makeProgressReporter(
-        for stage: Stage
-    ) -> (@Sendable (Double) -> Void) {
-        return { [weak self] streamFraction in
-            Task { @MainActor in
-                guard let self else { return }
-                guard case .running(let current, let prevOverall) = self.state,
-                      current == stage else { return }
-                let band = stage.progressRange
-                let clamped = max(0, min(1, streamFraction))
-                let newOverall = band.start + (band.end - band.start) * clamped
-                // Only republish on a >=0.5% delta — keeps SwiftUI from
-                // re-rendering the whole popover on every poll tick.
-                if abs(newOverall - prevOverall) >= 0.005 || streamFraction >= 1 {
-                    self.state = .running(stage: stage, overall: newOverall)
-                }
-            }
-        }
+        /// Linear ordering used by progress UI strips.
+        static let pipeline: [Stage] = [
+            .loadingModels, .transcribingMic, .transcribingOutput, .merging, .writing,
+        ]
     }
 }

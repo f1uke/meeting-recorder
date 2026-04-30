@@ -370,6 +370,7 @@ private struct MeetingRow: View {
     let onSelect: () -> Void
     @EnvironmentObject private var library: MeetingsLibrary
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var queue: TranscriptionQueue
 
     var body: some View {
         Button(action: onSelect) {
@@ -398,6 +399,7 @@ private struct MeetingRow: View {
                                 .font(.system(size: 10.5))
                                 .labelStyle(.titleAndIcon)
                         }
+                        statusBadge
                     }
                     .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.textFaint)
                 }
@@ -424,6 +426,31 @@ private struct MeetingRow: View {
                 appState.route = .transcript
             }
         )
+    }
+
+    /// Inline transcription-status badge appended to the meta row when
+    /// the queue has work for this folder. Tints by tone:
+    ///   - blue capsule  → queued / transcribing (with %)
+    ///   - amber capsule → failed (clickable retry handled in detail)
+    ///   - none          → idle / completed
+    @ViewBuilder
+    private var statusBadge: some View {
+        if let job = queue.latestJob(forFolder: meeting.folder) {
+            switch job.state {
+            case .queued:
+                StatusPill(text: "Queued", tone: .info, isSelected: isSelected)
+            case let .running(_, overall):
+                StatusPill(
+                    text: "Transcribing \(Int((overall * 100).rounded()))%",
+                    tone: .info,
+                    isSelected: isSelected
+                )
+            case .failed:
+                StatusPill(text: "Failed", tone: .warning, isSelected: isSelected)
+            case .done, .cancelled:
+                EmptyView()
+            }
+        }
     }
 
     private var initials: String {
@@ -495,6 +522,7 @@ private struct LibraryDetail: View {
             if let meeting = library.selectedMeeting {
                 VStack(spacing: 0) {
                     DetailToolbar(meeting: meeting)
+                    JobStatusBanner(meeting: meeting)
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 22) {
                             DetailHero(meeting: meeting)
@@ -526,7 +554,7 @@ private struct DetailToolbar: View {
     let meeting: MeetingRecord
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var library: MeetingsLibrary
-    @EnvironmentObject private var transcribe: TranscriptionSession
+    @EnvironmentObject private var queue: TranscriptionQueue
     @Environment(\.openWindow) private var openWindow
     @AppStorage("dev.fluke.meeting.summaryDisclosureSeen") private var disclosureSeen = false
     @State private var showDisclosure = false
@@ -544,8 +572,7 @@ private struct DetailToolbar: View {
     }
 
     private var isTranscribing: Bool {
-        if case .running = transcribe.state { return true }
-        return false
+        queue.activeJob(forFolder: meeting.folder) != nil
     }
 
     private var retranscribeEnabled: Bool {
@@ -1308,6 +1335,153 @@ private struct AttendeeChip: View {
 
     private var chipColor: Color {
         attendee.isMe ? Color.brandAccent : Color.textDim
+    }
+}
+
+// =============================================================================
+// MARK: - Transcription status (queue-driven)
+// =============================================================================
+
+/// Inline tag rendered in `MeetingRow`'s metadata strip and (in a larger
+/// form) by `JobStatusBanner` below. Picks tone-appropriate colours and
+/// inverts when the parent row is the selected blue background.
+private struct StatusPill: View {
+    enum Tone { case info, warning }
+    let text: String
+    let tone: Tone
+    let isSelected: Bool
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .foregroundStyle(textColor)
+            .background {
+                Capsule().fill(backgroundColor)
+            }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected { return Color.white.opacity(0.25) }
+        switch tone {
+        case .info:    return Color.brandAccent.opacity(0.15)
+        case .warning: return Color.warmMark.opacity(0.18)
+        }
+    }
+
+    private var textColor: Color {
+        if isSelected { return .white }
+        switch tone {
+        case .info:    return Color.brandAccent
+        case .warning: return Color.warmMark
+        }
+    }
+}
+
+/// Status strip rendered between the detail toolbar and the scrollable
+/// content when the queue has work for this meeting. Lets the user
+/// cancel an in-flight or queued job and retry one that failed without
+/// having to dig into a settings menu.
+private struct JobStatusBanner: View {
+    let meeting: MeetingRecord
+    @EnvironmentObject private var queue: TranscriptionQueue
+
+    var body: some View {
+        if let job = queue.latestJob(forFolder: meeting.folder),
+           !shouldHide(job: job) {
+            content(for: job)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background {
+                    Rectangle().fill(backgroundColor(for: job))
+                }
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
+                }
+        }
+    }
+
+    private func shouldHide(job: TranscriptionJob) -> Bool {
+        // Don't surface successful or cancelled jobs — those are normal
+        // outcomes; the row badge already disappears for them.
+        switch job.state {
+        case .done, .cancelled: return true
+        default: return false
+        }
+    }
+
+    @ViewBuilder
+    private func content(for job: TranscriptionJob) -> some View {
+        HStack(spacing: 12) {
+            switch job.state {
+            case .queued:
+                ProgressView().controlSize(.small)
+                Text("Queued for transcription")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.textPrimary)
+                Text("· \(queueLabel)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textDim)
+                Spacer()
+                Button("Cancel") { queue.cancel(job.id) }
+                    .controlSize(.small)
+            case let .running(stage, overall):
+                Image(systemName: "waveform")
+                    .foregroundStyle(Color.brandAccent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stage.localizedName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.textPrimary)
+                    Text("\(Int((overall * 100).rounded()))% · \(job.providerName) (\(job.modelName))")
+                        .font(.mono(11))
+                        .foregroundStyle(Color.textDim)
+                }
+                Spacer()
+                Button("Cancel") { queue.cancel(job.id) }
+                    .controlSize(.small)
+            case let .failed(message):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.warmMark)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Transcription failed")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.textPrimary)
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textDim)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button("Retry") { queue.retry(job.id) }
+                    .controlSize(.small)
+                Button("Dismiss") { queue.dismiss(job.id) }
+                    .controlSize(.small)
+            case .done, .cancelled:
+                EmptyView()  // hidden via shouldHide
+            }
+        }
+    }
+
+    private func backgroundColor(for job: TranscriptionJob) -> Color {
+        switch job.state {
+        case .failed: return Color.warmMark.opacity(0.10)
+        default:      return Color.brandAccent.opacity(0.08)
+        }
+    }
+
+    /// Position-in-queue suffix for queued jobs. Just shows "next up" if
+    /// this is the head of the queue, otherwise "Nth in queue".
+    private var queueLabel: String {
+        let queued = queue.jobs.compactMap { job -> TranscriptionJob? in
+            if case .queued = job.state { return job }
+            return nil
+        }
+        guard let idx = queued.firstIndex(where: { $0.meetingFolder == meeting.folder }) else {
+            return "queued"
+        }
+        return idx == 0 ? "next up" : "\(idx + 1) in queue"
     }
 }
 
