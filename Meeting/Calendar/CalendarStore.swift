@@ -219,8 +219,29 @@ final class CalendarStore: ObservableObject {
     }
 
     private static func snapshot(from event: EKEvent, meEmails: Set<String>) -> CalendarEvent {
-        let attendees: [CalendarAttendee] = (event.attendees ?? []).map {
+        // Group expansion: if any attendee email matches a user-defined
+        // group mapping (Settings → Calendar → Group expansions), replace
+        // the single group entry with its members. Lets us see real
+        // people for events invited via Workspace groups, which EventKit
+        // can't expand on its own.
+        let groupExpansions = AppPreferences.shared.groupExpansions
+        let rawAttendees = (event.attendees ?? []).map {
             attendee(from: $0, meEmails: meEmails)
+        }
+        let attendees: [CalendarAttendee] = rawAttendees.flatMap { entry -> [CalendarAttendee] in
+            guard let email = entry.email?.lowercased(),
+                  let members = groupExpansions[email],
+                  !members.isEmpty else {
+                return [entry]
+            }
+            return members.map { member in
+                CalendarAttendee(
+                    displayName: member.displayName,
+                    email: member.email,
+                    isMe: meEmails.contains(member.email),
+                    role: entry.role
+                )
+            }
         }
         let organizer = event.organizer.map { attendee(from: $0, meEmails: meEmails) }
         let openURL = URL(string: "x-apple-calevent://\(event.eventIdentifier ?? "")")

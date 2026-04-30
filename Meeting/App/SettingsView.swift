@@ -727,6 +727,10 @@ private struct CalendarTab: View {
                     .padding(.vertical, 12)
                 }
             }
+
+            SettingsSection(label: "Group expansions") {
+                GroupExpansionsEditor()
+            }
         }
     }
 
@@ -752,6 +756,213 @@ private struct CalendarTab: View {
         var updated = prefs.myEmails
         updated.remove(email)
         prefs.myEmails = updated
+    }
+}
+
+/// Editor for the manual group → members map. Used when EventKit can't
+/// expand a Workspace group invite (e.g. `team@finnomena.com`) so the
+/// calendar surfaces a single group entry instead of the actual people.
+/// Once a group is mapped here, `CalendarStore.snapshot` substitutes the
+/// expansion when building `calendar.json` for new recordings.
+private struct GroupExpansionsEditor: View {
+    @ObservedObject private var prefs = AppPreferences.shared
+    @State private var newGroupEmail: String = ""
+    @State private var draftMemberName: [String: String] = [:]
+    @State private var draftMemberEmail: [String: String] = [:]
+    @State private var showAddGroupRow = false
+
+    private var sortedGroups: [String] {
+        prefs.groupExpansions.keys.sorted()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if sortedGroups.isEmpty && !showAddGroupRow {
+                Text("Add a group email (e.g. team@example.com) plus its members. The calendar will substitute these names whenever the group appears as an attendee.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+            }
+
+            ForEach(Array(sortedGroups.enumerated()), id: \.element) { idx, groupEmail in
+                groupBlock(for: groupEmail)
+                if idx < sortedGroups.count - 1 || showAddGroupRow {
+                    Divider().opacity(0.3)
+                }
+            }
+
+            if showAddGroupRow {
+                addGroupInline
+            }
+
+            HStack {
+                Spacer()
+                Button(showAddGroupRow ? "Cancel" : "Add group") {
+                    if showAddGroupRow {
+                        newGroupEmail = ""
+                    }
+                    showAddGroupRow.toggle()
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+    }
+
+    @ViewBuilder
+    private func groupBlock(for groupEmail: String) -> some View {
+        let members = prefs.groupExpansions[groupEmail] ?? []
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "person.3.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.brandAccent)
+                Text(groupEmail)
+                    .font(.mono(12))
+                    .foregroundStyle(Color.textPrimary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(members.count == 1 ? "1 member" : "\(members.count) members")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.textFaint)
+                Button(action: { removeGroup(groupEmail) }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.textFaint)
+                }
+                .buttonStyle(.plain)
+                .help("Remove group")
+            }
+
+            if !members.isEmpty {
+                FlowLayout(spacing: 6) {
+                    ForEach(members) { member in
+                        memberChip(groupEmail: groupEmail, member: member)
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                TextField(
+                    "Name (optional)",
+                    text: Binding(
+                        get: { draftMemberName[groupEmail] ?? "" },
+                        set: { draftMemberName[groupEmail] = $0 }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .frame(maxWidth: 140)
+
+                TextField(
+                    "name@example.com",
+                    text: Binding(
+                        get: { draftMemberEmail[groupEmail] ?? "" },
+                        set: { draftMemberEmail[groupEmail] = $0 }
+                    ),
+                    onCommit: { addMember(to: groupEmail) }
+                )
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+
+                Button("Add", action: { addMember(to: groupEmail) })
+                    .controlSize(.small)
+                    .disabled(!isValidEmail(draftMemberEmail[groupEmail] ?? ""))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func memberChip(groupEmail: String, member: GroupMember) -> some View {
+        HStack(spacing: 4) {
+            Text(member.displayName)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.textPrimary)
+            Text(member.email)
+                .font(.mono(10))
+                .foregroundStyle(Color.textDim)
+                .lineLimit(1)
+            Button(action: { removeMember(from: groupEmail, member: member) }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Color.textFaint)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background {
+            Capsule().fill(Color.primary.opacity(0.06))
+        }
+    }
+
+    private var addGroupInline: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "plus.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.textDim)
+            TextField("group@example.com", text: $newGroupEmail, onCommit: saveNewGroup)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+            Button("Save", action: saveNewGroup)
+                .controlSize(.small)
+                .disabled(!isValidEmail(newGroupEmail))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Actions
+
+    private func saveNewGroup() {
+        let trimmed = newGroupEmail.trimmingCharacters(in: .whitespaces).lowercased()
+        guard isValidEmail(trimmed) else { return }
+        var updated = prefs.groupExpansions
+        if updated[trimmed] == nil { updated[trimmed] = [] }
+        prefs.groupExpansions = updated
+        newGroupEmail = ""
+        showAddGroupRow = false
+    }
+
+    private func removeGroup(_ groupEmail: String) {
+        var updated = prefs.groupExpansions
+        updated.removeValue(forKey: groupEmail)
+        prefs.groupExpansions = updated
+        draftMemberName.removeValue(forKey: groupEmail)
+        draftMemberEmail.removeValue(forKey: groupEmail)
+    }
+
+    private func addMember(to groupEmail: String) {
+        let emailRaw = (draftMemberEmail[groupEmail] ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        guard isValidEmail(emailRaw) else { return }
+        let nameRaw = draftMemberName[groupEmail] ?? ""
+        let member = GroupMember(name: nameRaw, email: emailRaw)
+        var updated = prefs.groupExpansions
+        var members = updated[groupEmail] ?? []
+        if !members.contains(where: { $0.email == member.email }) {
+            members.append(member)
+        }
+        updated[groupEmail] = members
+        prefs.groupExpansions = updated
+        draftMemberName[groupEmail] = ""
+        draftMemberEmail[groupEmail] = ""
+    }
+
+    private func removeMember(from groupEmail: String, member: GroupMember) {
+        var updated = prefs.groupExpansions
+        updated[groupEmail]?.removeAll { $0.email == member.email }
+        prefs.groupExpansions = updated
+    }
+
+    private func isValidEmail(_ s: String) -> Bool {
+        let trimmed = s.trimmingCharacters(in: .whitespaces)
+        return trimmed.contains("@") && trimmed.contains(".") && trimmed.count >= 5
     }
 }
 

@@ -50,6 +50,20 @@ final class AppPreferences: ObservableObject {
         }
     }
 
+    /// Manual override for group emails that EventKit can't expand into
+    /// individual members (Google Workspace groups, distribution lists,
+    /// etc.). Maps lowercased group email → list of members.
+    /// `CalendarStore.snapshot` substitutes the group entry with these
+    /// members when building `calendar.json`, so the Library detail and
+    /// the LLM prompt see real people instead of a single "group" line.
+    /// Stored as JSON in UserDefaults.
+    @Published var groupExpansions: [String: [GroupMember]] {
+        didSet {
+            let data = try? JSONEncoder().encode(groupExpansions)
+            UserDefaults.standard.set(data, forKey: Keys.groupExpansions)
+        }
+    }
+
     private init() {
         let raw = UserDefaults.standard.object(forKey: Keys.expectedSpeakers) as? Int
         self.expectedSpeakerCount = ExpectedSpeakers(storageValue: raw)
@@ -71,6 +85,12 @@ final class AppPreferences: ObservableObject {
                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
                 .filter { !$0.isEmpty }
         )
+        if let data = UserDefaults.standard.data(forKey: Keys.groupExpansions),
+           let decoded = try? JSONDecoder().decode([String: [GroupMember]].self, from: data) {
+            self.groupExpansions = decoded
+        } else {
+            self.groupExpansions = [:]
+        }
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -95,7 +115,36 @@ final class AppPreferences: ObservableObject {
         static let showMenuBarTimer = "dev.fluke.meeting.showMenuBarTimer"
         static let appearance = "dev.fluke.meeting.appearance"
         static let myEmails = "dev.fluke.meeting.myEmails"
+        static let groupExpansions = "dev.fluke.meeting.groupExpansions"
     }
+}
+
+// MARK: - Group expansion
+
+/// Single member of a manually-expanded calendar group. Email is required
+/// (so we can dedupe / mark `isMe`); display name is optional and falls
+/// back to the email's local part in the UI.
+struct GroupMember: Codable, Hashable, Sendable, Identifiable {
+    var id: String { email.lowercased() }
+    let name: String?
+    let email: String
+
+    init(name: String? = nil, email: String) {
+        self.name = name?.trimmingCharacters(in: .whitespaces).nilIfEmpty
+        self.email = email.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+
+    /// Display name resolved against the optional `name` field — falls
+    /// back to the email's local part ("foo@bar.com" → "foo") so empty
+    /// chips never appear.
+    var displayName: String {
+        if let name { return name }
+        return email.components(separatedBy: "@").first ?? email
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 // MARK: - Expected speaker count
