@@ -26,11 +26,7 @@ struct SettingsView: View {
                     switch selection {
                     case .general:       GeneralTab()
                     case .recording:     RecordingTab()
-                    case .transcription: ComingSoonTab(
-                        title: "Transcription",
-                        subtitle: "Tweak Whisper chunking, hallucination filters, and post-processing.",
-                        icon: "waveform"
-                    )
+                    case .transcription: TranscriptionTab()
                     case .permissions:   PermissionsTab()
                     case .calendar:      CalendarTab()
                     case .aiPrivacy:     ComingSoonTab(
@@ -376,26 +372,311 @@ private struct RecordingTab: View {
                     label: \.displayName
                 )
             }
-
-            SettingsSection(label: "Transcription model") {
-                ModelPickerRow(
-                    selection: Binding(
-                        get: { prefs.modelVariant },
-                        set: { newValue in
-                            prefs.modelVariant = newValue
-                        }
-                    )
-                )
-                Divider().opacity(0.4)
-                InlineNote(
-                    text: "The model loads on first use after switching. The current loaded model stays in memory until the next recording finishes.",
-                    tone: .info
-                )
-            }
         }
         .task {
             devices = AudioInputDevices.enumerate()
         }
+    }
+}
+
+// =============================================================================
+// MARK: - Transcription tab
+// =============================================================================
+
+private struct TranscriptionTab: View {
+    @ObservedObject private var prefs = AppPreferences.shared
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            DetailHeader(
+                title: "Transcription",
+                subtitle: "Pick which engine turns audio into text. Diarization (who said what) always runs locally via SpeakerKit."
+            )
+
+            SettingsSection(label: "Engine") {
+                EnginePickerRow(
+                    selection: Binding(
+                        get: { prefs.transcriptionEngine },
+                        set: { newValue in
+                            prefs.transcriptionEngine = newValue
+                            appState.applyTranscriptionProviderChange()
+                        }
+                    )
+                )
+            }
+
+            switch prefs.transcriptionEngine {
+            case .local:
+                SettingsSection(label: "Local model") {
+                    ModelPickerRow(
+                        selection: Binding(
+                            get: { prefs.modelVariant },
+                            set: { newValue in
+                                prefs.modelVariant = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        )
+                    )
+                    Divider().opacity(0.4)
+                    InlineNote(
+                        text: "The model loads on first use after switching. The current loaded model stays in memory until the next recording finishes.",
+                        tone: .info
+                    )
+                }
+            case .gemini:
+                SettingsSection(label: "Gemini model") {
+                    GeminiModelPickerRow(
+                        selection: Binding(
+                            get: { prefs.geminiModel },
+                            set: { newValue in
+                                prefs.geminiModel = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        )
+                    )
+                }
+
+                SettingsSection(label: "Gemini API") {
+                    APIKeyRow(
+                        title: "API key",
+                        description: "Get one at ai.google.dev. Stored in macOS preferences (will move to Keychain in a later release).",
+                        value: Binding(
+                            get: { prefs.geminiAPIKey },
+                            set: { newValue in
+                                prefs.geminiAPIKey = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        )
+                    )
+                }
+
+            case .openai:
+                SettingsSection(label: "OpenAI model") {
+                    OpenAIModelPickerRow(
+                        selection: Binding(
+                            get: { prefs.openaiModel },
+                            set: { newValue in
+                                prefs.openaiModel = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        )
+                    )
+                }
+
+                SettingsSection(label: "OpenAI API") {
+                    APIKeyRow(
+                        title: "API key",
+                        description: "Get one at platform.openai.com → API keys. Stored in macOS preferences (will move to Keychain in a later release).",
+                        value: Binding(
+                            get: { prefs.openaiAPIKey },
+                            set: { newValue in
+                                prefs.openaiAPIKey = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        )
+                    )
+                }
+
+                SettingsSection(label: "Glossary") {
+                    GlossaryEditorRow(
+                        value: Binding(
+                            get: { prefs.transcriptionGlossary },
+                            set: { newValue in
+                                prefs.transcriptionGlossary = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        ),
+                        resetToDefault: {
+                            prefs.transcriptionGlossary = TranscriptionEngine.defaultGlossary
+                            appState.applyTranscriptionProviderChange()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+private struct EnginePickerRow: View {
+    @Binding var selection: TranscriptionEngine
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(TranscriptionEngine.allCases) { engine in
+                Button(action: { selection = engine }) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: selection == engine ? "largecircle.fill.circle" : "circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(selection == engine ? Color.brandAccent : Color.textDim)
+                            .padding(.top, 1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(engine.displayName)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.textPrimary)
+                            Text(engine.description)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.textDim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct GeminiModelPickerRow: View {
+    @Binding var selection: GeminiModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(GeminiModel.allCases) { model in
+                Button(action: { selection = model }) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: selection == model ? "largecircle.fill.circle" : "circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(selection == model ? Color.brandAccent : Color.textDim)
+                            .padding(.top, 1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.displayName)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.textPrimary)
+                            Text(model.description)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.textDim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct OpenAIModelPickerRow: View {
+    @Binding var selection: OpenAIModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(OpenAIModel.allCases) { model in
+                Button(action: { selection = model }) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: selection == model ? "largecircle.fill.circle" : "circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(selection == model ? Color.brandAccent : Color.textDim)
+                            .padding(.top, 1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.displayName)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.textPrimary)
+                            Text(model.description)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.textDim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct APIKeyRow: View {
+    let title: String
+    let description: String
+    @Binding var value: String
+    @State private var revealed: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.textPrimary)
+                Text(description)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                Group {
+                    if revealed {
+                        TextField("paste your API key", text: $value)
+                    } else {
+                        SecureField("paste your API key", text: $value)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .font(.mono(11))
+
+                Button(action: { revealed.toggle() }) {
+                    Image(systemName: revealed ? "eye.slash" : "eye")
+                        .font(.system(size: 12))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(revealed ? "Hide" : "Reveal")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct GlossaryEditorRow: View {
+    @Binding var value: String
+    let resetToDefault: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Domain glossary")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.textPrimary)
+                Text("Comma-separated terms primed into the cloud provider's system prompt so Thai-leaning transcription doesn't butcher inline English jargon.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            TextEditor(text: $value)
+                .font(.mono(11))
+                .frame(minHeight: 80, maxHeight: 140)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                        }
+                }
+            HStack {
+                Spacer()
+                Button("Reset to default", action: resetToDefault)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }
 

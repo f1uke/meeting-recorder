@@ -27,3 +27,4 @@ tools/whisper/models/
 tools/biodatlab-whisper-th/venv/
 tools/biodatlab-whisper-th/whisperkittools/
 tools/biodatlab-whisper-th/_workspace/
+.claude/settings.json

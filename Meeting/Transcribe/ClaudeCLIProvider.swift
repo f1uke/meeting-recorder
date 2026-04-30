@@ -67,27 +67,49 @@ actor ClaudeCLIProvider: LLMProvider {
     // MARK: - Helpers
 
     private static func resolveClaudeBinary() -> URL? {
-        // Use a login shell so PATH includes user-installed binaries
-        // (homebrew, npm global, asdf shims).
+        // Spawn the user's actual login shell *interactively* (`-ilc`).
+        // `/bin/sh -lc` only sources `~/.profile` — it misses `~/.zshrc`,
+        // which is where most users add `~/.local/bin`, `~/.npm-global/bin`,
+        // nvm shims, etc. From a GUI-launched app the env is clean, so
+        // those PATH additions never make it in unless we ask zsh (or
+        // whichever $SHELL) to run interactively.
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-lc", "command -v claude || which claude"]
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-ilc", "command -v claude"]
         let pipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = pipe
         process.standardError = errPipe
-        do {
-            try process.run()
+        if (try? process.run()) != nil {
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let path = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let path, !path.isEmpty,
-                  FileManager.default.isExecutableFile(atPath: path) else { return nil }
-            return URL(fileURLWithPath: path)
-        } catch {
-            return nil
+            // Interactive shells may print plugin warnings (gitstatus,
+            // p10k, etc.) to stdout before our command runs. Pick the
+            // last line that looks like an absolute path.
+            let lines = (String(data: data, encoding: .utf8) ?? "")
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            if let path = lines.last(where: { $0.hasPrefix("/") }),
+               FileManager.default.isExecutableFile(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
         }
+
+        // Fallback: probe well-known install locations directly. Catches
+        // users whose shell rc is slow / errors out, and is independent of
+        // whatever PATH gymnastics they've set up.
+        let home = NSHomeDirectory()
+        let candidates = [
+            "\(home)/.local/bin/claude",
+            "\(home)/.npm-global/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+        ]
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
     }
 
     private static func buildPrompt(context: MeetingLLMContext) -> String {

@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import Accelerate
 import WhisperKit
 import SpeakerKit
@@ -13,6 +14,35 @@ import SpeakerKit
 // boundaries safely; both kits are internally thread-safe.
 private struct KitBox: @unchecked Sendable { let kit: WhisperKit }
 private struct DiarizerBox: @unchecked Sendable { let kit: SpeakerKit }
+
+/// Tracks the furthest audio time reached by Whisper's segment-discovery
+/// callbacks for one transcribe invocation. With VAD chunking + default
+/// concurrent worker count, callbacks may fire from different chunks in
+/// non-monotonic order — track the max so the UI bar never moves backward.
+private final class SegmentProgressTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var maxAbsEnd: Double = 0
+
+    /// Absorb a batch from `segmentDiscoveryCallback`. Returns the new
+    /// max-end (in seconds) if it advanced, `nil` otherwise.
+    /// `seek` is in absolute samples after WhisperKit's chunk-offset
+    /// adjustment (per `transcribeWithOptions`); `end` is chunk-local
+    /// seconds. With our VAD config (1 window per chunk), the chunk's
+    /// window-start offset is 0, so `seek/sampleRate + end` is the
+    /// absolute end time in source-audio seconds.
+    func absorb(_ segments: [TranscriptionSegment], sampleRate: Double) -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        var advanced = false
+        for s in segments {
+            let absEnd = Double(s.seek) / sampleRate + Double(s.end)
+            if absEnd > maxAbsEnd {
+                maxAbsEnd = absEnd
+                advanced = true
+            }
+        }
+        return advanced ? maxAbsEnd : nil
+    }
+}
 
 actor LocalProvider: TranscriptionProvider {
     nonisolated let name: String
@@ -73,6 +103,10 @@ actor LocalProvider: TranscriptionProvider {
         let needsArrayPath = (options.mutedIntervals?.isEmpty == false)
             || options.referenceAudioURL != nil
             || options.normalizeLoudness
+        // Audio duration drives the audio-time-based progress reporter — see
+        // `runTranscribe`/`runTranscribeArray`. For the file path we read
+        // length once via AVAudioFile (cheap header parse, no full decode).
+        let fileDuration: Double = needsArrayPath ? 0 : Self.audioDurationSeconds(at: audioURL) ?? 0
         if needsArrayPath {
             // Array path: load the file as a 16 kHz mono float, optionally
             // (1) cancel speaker echo using a reference audio stream,
@@ -136,6 +170,7 @@ actor LocalProvider: TranscriptionProvider {
             chunks = try await Self.runTranscribeArray(
                 box: kit,
                 audioArray: audio,
+                audioDuration: Double(audio.count) / 16000.0,
                 language: options.language,
                 providerName: name,
                 onProgress: whisperReporter
@@ -144,6 +179,7 @@ actor LocalProvider: TranscriptionProvider {
             chunks = try await Self.runTranscribe(
                 box: kit,
                 audioPath: path,
+                audioDuration: fileDuration,
                 language: options.language,
                 providerName: name,
                 onProgress: whisperReporter
@@ -272,6 +308,7 @@ actor LocalProvider: TranscriptionProvider {
     private static func runTranscribe(
         box: KitBox,
         audioPath: String,
+        audioDuration: Double,
         language: String?,
         providerName: String,
         onProgress: (@Sendable (Double) -> Void)?
@@ -286,30 +323,17 @@ actor LocalProvider: TranscriptionProvider {
             chunkingStrategy: .vad
         )
 
-        // Snapshot Foundation Progress baseline. WhisperKit's `progress`
-        // monotonically grows across calls (`totalUnitCount = max(...)`)
-        // because the same Progress object is shared — without a baseline
-        // a second call would start at the previous fractionCompleted.
-        let baseCompleted = box.kit.progress.completedUnitCount
-        let baseTotal = box.kit.progress.totalUnitCount
-
-        let pollerTask: Task<Void, Never>? = onProgress.map { report in
-            Task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(250))
-                    let p = box.kit.progress
-                    let completed = p.completedUnitCount - baseCompleted
-                    let total = p.totalUnitCount - baseTotal
-                    guard total > 0 else { continue }
-                    let f = max(0.0, min(1.0, Double(completed) / Double(total)))
-                    report(f)
-                }
-            }
-        }
-        defer { pollerTask?.cancel() }
+        installSegmentProgress(box: box, audioDuration: audioDuration, onProgress: onProgress)
+        defer { box.kit.segmentDiscoveryCallback = nil }
 
         do {
-            return try await box.kit.transcribe(audioPath: audioPath, decodeOptions: decode)
+            let result = try await box.kit.transcribe(audioPath: audioPath, decodeOptions: decode)
+            // VAD trims trailing silence so the last segment.end may stop
+            // a few hundred ms short of the file end — bump to 1.0 so the
+            // bar reaches the right edge of the whisper share before we
+            // (optionally) hand off to SpeakerKit.
+            onProgress?(1.0)
+            return result
         } catch {
             throw TranscriptionError.providerFailed(providerName, underlying: error)
         }
@@ -350,6 +374,7 @@ actor LocalProvider: TranscriptionProvider {
     private static func runTranscribeArray(
         box: KitBox,
         audioArray: [Float],
+        audioDuration: Double,
         language: String?,
         providerName: String,
         onProgress: (@Sendable (Double) -> Void)?
@@ -367,29 +392,50 @@ actor LocalProvider: TranscriptionProvider {
             chunkingStrategy: .vad
         )
 
-        let baseCompleted = box.kit.progress.completedUnitCount
-        let baseTotal = box.kit.progress.totalUnitCount
-
-        let pollerTask: Task<Void, Never>? = onProgress.map { report in
-            Task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(250))
-                    let p = box.kit.progress
-                    let completed = p.completedUnitCount - baseCompleted
-                    let total = p.totalUnitCount - baseTotal
-                    guard total > 0 else { continue }
-                    let f = max(0.0, min(1.0, Double(completed) / Double(total)))
-                    report(f)
-                }
-            }
-        }
-        defer { pollerTask?.cancel() }
+        installSegmentProgress(box: box, audioDuration: audioDuration, onProgress: onProgress)
+        defer { box.kit.segmentDiscoveryCallback = nil }
 
         do {
-            return try await box.kit.transcribe(audioArray: audioArray, decodeOptions: decode)
+            let result = try await box.kit.transcribe(audioArray: audioArray, decodeOptions: decode)
+            onProgress?(1.0)
+            return result
         } catch {
             throw TranscriptionError.providerFailed(providerName, underlying: error)
         }
+    }
+
+    /// Wire up Whisper's `segmentDiscoveryCallback` to convert chunk-level
+    /// segment emission into an audio-time-weighted fraction. Replaces the
+    /// previous Foundation-`Progress` poller, which was unreliable under
+    /// VAD chunking — `progress.totalUnitCount` is overwritten per chunk
+    /// inside `TranscribeTask`, making completed/total ratios meaningless
+    /// across chunk boundaries (the bar would sit at 0% then jump to 100%
+    /// of the whisper share after the first chunk completed).
+    private static func installSegmentProgress(
+        box: KitBox,
+        audioDuration: Double,
+        onProgress: (@Sendable (Double) -> Void)?
+    ) {
+        guard let report = onProgress, audioDuration > 0 else {
+            box.kit.segmentDiscoveryCallback = nil
+            return
+        }
+        let tracker = SegmentProgressTracker()
+        box.kit.segmentDiscoveryCallback = { segments in
+            if let absEnd = tracker.absorb(segments, sampleRate: 16000) {
+                report(min(1.0, absEnd / audioDuration))
+            }
+        }
+    }
+
+    /// Read source-audio duration in seconds via AVAudioFile's header.
+    /// Fast (no decode) and works for both wav and m4a. Returns nil if the
+    /// file can't be opened — the caller falls back to no-progress mode.
+    private static func audioDurationSeconds(at url: URL) -> Double? {
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let rate = file.processingFormat.sampleRate
+        guard rate > 0 else { return nil }
+        return Double(file.length) / rate
     }
 
     private static func runDiarize(

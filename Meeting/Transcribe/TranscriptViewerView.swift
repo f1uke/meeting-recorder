@@ -212,6 +212,25 @@ private struct TranscriptToolbar: View {
     @Binding var search: String
     @FocusState private var searchFocused: Bool
     @EnvironmentObject private var appState: AppState
+    @AppStorage("dev.fluke.meeting.summaryDisclosureSeen") private var disclosureSeen = false
+    @State private var showDisclosure = false
+
+    private var summaryEnabled: Bool {
+        meeting.hasTranscript && appState.llmAvailability == .available
+    }
+
+    private var isGeneratingSummary: Bool {
+        if case .running = appState.summaryGeneration[meeting.id] { return true }
+        return false
+    }
+
+    private func generateOrRegenerate() {
+        if !disclosureSeen {
+            showDisclosure = true
+            return
+        }
+        Task { await appState.generateSummary(for: meeting) }
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -273,9 +292,17 @@ private struct TranscriptToolbar: View {
                     .accessibilityHidden(true)
             }
 
-            ToolbarPill(icon: "sparkles", label: "Summary") {}
-                .disabled(true)
-                .help("Summary requires Claude Code — coming in U8b")
+            ToolbarPill(
+                icon: "sparkles",
+                label: isGeneratingSummary ? "Summarizing…" : "Summary"
+            ) {
+                generateOrRegenerate()
+            }
+            .disabled(!summaryEnabled || isGeneratingSummary)
+            .help(summaryEnabled
+                ? (meeting.summary == nil ? "Generate AI summary via Claude" : "Regenerate via Claude")
+                : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
+            )
             ToolbarPill(icon: "square.and.arrow.down", label: "Export") {
                 exportSheetReExport()
             }
@@ -285,6 +312,15 @@ private struct TranscriptToolbar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .alert("Send transcript to Claude?", isPresented: $showDisclosure) {
+            Button("Cancel", role: .cancel) {}
+            Button("Continue") {
+                disclosureSeen = true
+                Task { await appState.generateSummary(for: meeting) }
+            }
+        } message: {
+            Text("AI summary uses your Claude Code installation to generate a summary and action items. The transcript will be sent to Claude. This is the only step that ever leaves your Mac — recording and transcription stay local.")
+        }
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
         }

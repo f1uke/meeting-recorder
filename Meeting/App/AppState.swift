@@ -39,8 +39,7 @@ final class AppState: ObservableObject {
 
     init() {
         self.recording = RecordingSession()
-        let variant = AppPreferences.shared.modelVariant.rawValue
-        self.transcribe = TranscriptionSession(provider: LocalProvider(modelVariant: variant))
+        self.transcribe = TranscriptionSession(provider: Self.makeProvider())
         self.library = MeetingsLibrary()
         self.toast = ToastPresenter()
         self.llm = ClaudeCLIProvider()
@@ -62,13 +61,37 @@ final class AppState: ObservableObject {
     }
 
     /// Replace the underlying transcription provider — called when the
-    /// user picks a different Whisper model in Settings. Cheap to do
-    /// (model load is lazy on first transcribe), but no-ops mid-run so
-    /// we don't yank a provider out from under an in-flight job.
-    func applyModelVariantChange() {
+    /// user picks a different Whisper model, switches engine, or edits
+    /// the cloud API key / glossary in Settings. Cheap to do (model load
+    /// is lazy on first transcribe), but no-ops mid-run so we don't yank
+    /// a provider out from under an in-flight job.
+    func applyTranscriptionProviderChange() {
         if case .running = transcribe.state { return }
-        let variant = AppPreferences.shared.modelVariant.rawValue
-        transcribe.replaceProvider(LocalProvider(modelVariant: variant))
+        transcribe.replaceProvider(Self.makeProvider())
+    }
+
+    /// Build the active provider from current preferences. Called from
+    /// init and any settings change that affects provider construction.
+    private static func makeProvider() -> TranscriptionProvider {
+        let prefs = AppPreferences.shared
+        switch prefs.transcriptionEngine {
+        case .local:
+            return LocalProvider(modelVariant: prefs.modelVariant.rawValue)
+        case .gemini:
+            return GeminiProvider(
+                apiKey: prefs.geminiAPIKey,
+                glossary: prefs.transcriptionGlossary,
+                modelName: prefs.geminiModel.rawValue
+            )
+        case .openai:
+            return OpenAIProvider(
+                apiKey: prefs.openaiAPIKey,
+                glossary: prefs.transcriptionGlossary,
+                modelName: prefs.openaiModel.rawValue,
+                responseFormat: prefs.openaiModel.apiResponseFormat,
+                chunkDuration: prefs.openaiModel.chunkDuration
+            )
+        }
     }
 
     func refreshPermissions() async {
