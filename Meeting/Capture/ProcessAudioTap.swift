@@ -110,8 +110,8 @@ final class ProcessAudioTap: @unchecked Sendable {
         fileBox = box
 
         var procID: AudioDeviceIOProcID?
-        err = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, queue) { [box] _, inputData, _, _, _ in
-            box.handleInput(bufferList: inputData)
+        err = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, queue) { [box] _, inputData, inputTime, _, _ in
+            box.handleInput(bufferList: inputData, inputTime: inputTime)
         }
         guard err == noErr else { throw TapError.ioProc(err) }
         deviceProcID = procID
@@ -293,6 +293,17 @@ private final class AudioFileBox: @unchecked Sendable {
     private var loggedFirst = false
     private var totalFrames: UInt64 = 0
 
+    // CATap stops delivering buffers when the source process is silent, so
+    // without intervention the file's timeline collapses to "audible time
+    // only" while video.mov uses wall-clock time — playback ends up with
+    // audio racing ahead of video and transcript timestamps mis-aligned.
+    // We anchor on the device sample clock from the first IOProc call and
+    // pad each subsequent gap with silence so the file's frame count tracks
+    // wall-clock seconds.
+    private var firstSampleTime: Double?
+    private var paddedFrames: UInt64 = 0
+    private var silenceBuffer: AVAudioPCMBuffer?
+
     init(file: AVAudioFile, format: AVAudioFormat, rmsBuffer: RMSRingBuffer? = nil) {
         self.file = file
         self.format = format
@@ -310,13 +321,30 @@ private final class AudioFileBox: @unchecked Sendable {
         }
     }
 
-    func handleInput(bufferList inputData: UnsafePointer<AudioBufferList>) {
+    func handleInput(
+        bufferList inputData: UnsafePointer<AudioBufferList>,
+        inputTime: UnsafePointer<AudioTimeStamp>
+    ) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
-        guard abl.count > 0 else { return }
-        let firstBytes = abl[0].mDataByteSize
-        guard firstBytes > 0, bytesPerChannelFrame > 0 else { return }
+        let firstBytes = abl.count > 0 ? abl[0].mDataByteSize : 0
+        let frameCount: AVAudioFrameCount = (firstBytes > 0 && bytesPerChannelFrame > 0)
+            ? AVAudioFrameCount(Int(firstBytes) / bytesPerChannelFrame)
+            : 0
 
-        let frameCount = AVAudioFrameCount(Int(firstBytes) / bytesPerChannelFrame)
+        let ts = inputTime.pointee
+        if ts.mFlags.contains(.sampleTimeValid) {
+            if firstSampleTime == nil {
+                firstSampleTime = ts.mSampleTime
+            }
+            if let base = firstSampleTime {
+                let elapsed = Int64(ts.mSampleTime - base)
+                let gap = elapsed - Int64(totalFrames)
+                if gap > 0 {
+                    writeSilence(frames: gap)
+                }
+            }
+        }
+
         guard frameCount > 0 else { return }
 
         guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
@@ -354,8 +382,40 @@ private final class AudioFileBox: @unchecked Sendable {
         }
     }
 
+    private func writeSilence(frames: Int64) {
+        if silenceBuffer == nil {
+            let cap: AVAudioFrameCount = 4096
+            guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: cap) else { return }
+            buf.frameLength = cap
+            let abl = UnsafeMutableAudioBufferListPointer(buf.mutableAudioBufferList)
+            for i in 0..<abl.count {
+                if let p = abl[i].mData {
+                    memset(p, 0, Int(abl[i].mDataByteSize))
+                }
+            }
+            silenceBuffer = buf
+        }
+        guard let buf = silenceBuffer else { return }
+        let cap = Int64(buf.frameCapacity)
+        var remaining = frames
+        while remaining > 0 {
+            let chunk = AVAudioFrameCount(min(cap, remaining))
+            buf.frameLength = chunk
+            do {
+                try file.write(from: buf)
+                totalFrames += UInt64(chunk)
+                paddedFrames += UInt64(chunk)
+            } catch {
+                NSLog("[Meeting/Tap] silence write error: %@", String(describing: error))
+                return
+            }
+            remaining -= Int64(chunk)
+        }
+    }
+
     deinit {
-        NSLog("[Meeting/Tap] file closed, total frames written = %llu", totalFrames)
+        NSLog("[Meeting/Tap] file closed: total=%llu frames (silence-padded=%llu)",
+              totalFrames, paddedFrames)
     }
 }
 
