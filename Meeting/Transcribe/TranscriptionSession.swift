@@ -112,7 +112,9 @@ final class TranscriptionSession: ObservableObject {
                     withDiarization: false,
                     knownSpeaker: .me,
                     source: .mic,
-                    mutedIntervals: micGateIntervals
+                    mutedIntervals: micGateIntervals,
+                    referenceAudioURL: outputURL,
+                    normalizeLoudness: true
                 ),
                 progress: makeProgressReporter(for: .transcribingMic)
             )

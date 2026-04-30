@@ -69,19 +69,50 @@ actor LocalProvider: TranscriptionProvider {
         }
 
         let chunks: [TranscriptionResult]
-        if let muted = options.mutedIntervals, !muted.isEmpty {
-            // Mic gating path: load the file as a 16 kHz mono float array,
-            // zero out the muted ranges in place, then feed Whisper the
-            // already-silenced array. WhisperKit's VAD chunker will skip
-            // those zeroed regions naturally — no boilerplate hallucinations.
-            // Output (meeting) audio never goes through this branch; only
-            // mic.m4a carries `mutedIntervals` from MicGate.
+        let needsArrayPath = (options.mutedIntervals?.isEmpty == false)
+            || options.referenceAudioURL != nil
+            || options.normalizeLoudness
+        if needsArrayPath {
+            // Array path: load the file as a 16 kHz mono float, optionally
+            // (1) cancel speaker echo using a reference audio stream,
+            // (2) gate muted-mic ranges, and (3) peak-normalize, then feed
+            // the resulting array to Whisper directly. The on-disk archive
+            // is unchanged — preprocessing only affects what the model sees.
             var audio = try Self.loadAudioArray(path: path, providerName: name)
-            Self.applyGate(to: &audio, sampleRate: 16000, mutedIntervals: muted)
-            NSLog("[Meeting/Transcribe] mic gate applied: %d intervals → %.1fs of %.1fs zeroed",
-                  muted.count,
-                  muted.reduce(0) { $0 + ($1.end - $1.start) },
-                  Double(audio.count) / 16000)
+
+            if let refURL = options.referenceAudioURL {
+                let refPath = refURL.path(percentEncoded: false)
+                if FileManager.default.fileExists(atPath: refPath) {
+                    let reference = try Self.loadAudioArray(path: refPath, providerName: name)
+                    let shift = AudioPreprocessor.findReferenceShift(
+                        mic: audio, reference: reference
+                    )
+                    AudioPreprocessor.subtractEcho(
+                        mic: &audio,
+                        reference: reference,
+                        referenceShift: shift
+                    )
+                    NSLog("[Meeting/Transcribe] AEC: ref=%.1fs shift=%dms taps=1024",
+                          Double(reference.count) / 16000,
+                          shift * 1000 / 16000)
+                } else {
+                    NSLog("[Meeting/Transcribe] AEC skipped: reference missing at %@", refPath)
+                }
+            }
+
+            if options.normalizeLoudness {
+                let (preDB, postDB) = AudioPreprocessor.peakNormalize(&audio)
+                NSLog("[Meeting/Transcribe] normalize: %.1f dBFS → %.1f dBFS", preDB, postDB)
+            }
+
+            if let muted = options.mutedIntervals, !muted.isEmpty {
+                Self.applyGate(to: &audio, sampleRate: 16000, mutedIntervals: muted)
+                NSLog("[Meeting/Transcribe] mic gate applied: %d intervals → %.1fs of %.1fs zeroed",
+                      muted.count,
+                      muted.reduce(0) { $0 + ($1.end - $1.start) },
+                      Double(audio.count) / 16000)
+            }
+
             chunks = try await Self.runTranscribeArray(
                 box: kit,
                 audioArray: audio,

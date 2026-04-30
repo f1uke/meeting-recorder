@@ -75,6 +75,16 @@ struct TranscriptionOptions: Sendable {
     /// `nil` or empty = no gating (the file is transcribed as-is). Providers
     /// that can't honor this fall back to ungated transcription.
     var mutedIntervals: [MutedInterval]?
+    /// Far-end audio signal used to cancel speaker echo from the mic
+    /// stream via NLMS adaptive filtering. Only set on mic transcription
+    /// (typically the meeting's captured `output.m4a`); leave nil for the
+    /// output stream itself.
+    var referenceAudioURL: URL?
+    /// Boost gain so the audio's peak hits a target dBFS before Whisper
+    /// sees it. Quiet recordings (e.g. a built-in mic far from the user)
+    /// otherwise produce log-mel features dominated by noise floor and
+    /// trigger more hallucinations.
+    var normalizeLoudness: Bool
 
     init(
         language: String? = nil,
@@ -82,7 +92,9 @@ struct TranscriptionOptions: Sendable {
         knownSpeaker: SpeakerID? = nil,
         source: AudioSource,
         expectedSpeakerCount: Int? = nil,
-        mutedIntervals: [MutedInterval]? = nil
+        mutedIntervals: [MutedInterval]? = nil,
+        referenceAudioURL: URL? = nil,
+        normalizeLoudness: Bool = false
     ) {
         self.language = language
         self.withDiarization = withDiarization
@@ -90,6 +102,8 @@ struct TranscriptionOptions: Sendable {
         self.source = source
         self.expectedSpeakerCount = expectedSpeakerCount
         self.mutedIntervals = mutedIntervals
+        self.referenceAudioURL = referenceAudioURL
+        self.normalizeLoudness = normalizeLoudness
     }
 }
 
