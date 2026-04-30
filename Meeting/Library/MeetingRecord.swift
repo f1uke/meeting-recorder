@@ -22,8 +22,14 @@ struct MeetingRecord: Identifiable, Equatable, Hashable, Sendable {
     let speakerCount: Int
 
     /// Speaker IDs in transcript-defined order, with display names already
-    /// resolved against custom overrides.
+    /// resolved against `speakers.json`.
     let speakers: [Speaker]
+
+    /// Per-speaker profiles — display name plus the calendar attendee
+    /// the user mapped them to (email, role). Source of truth lives at
+    /// `<folder>/speakers.json`. Drives the LLM prompt's roster
+    /// section so Claude knows who each name actually is.
+    let speakerProfiles: [SpeakerProfile]
 
     /// Application name from the meeting's source ("Zoom", "Discord"...)
     /// — derived from the picker at recording time. Not persisted yet
@@ -79,23 +85,32 @@ struct LibraryOverrides: Codable, Sendable {
 
 /// User-supplied overrides for a single meeting. Keyed by folder name in
 /// the parent `LibraryOverrides.meetings` map.
+///
+/// Note: speaker rename / attendee mapping was previously stored here
+/// as `customSpeakerNames`; that moved to `<meeting>/speakers.json`
+/// (see `SpeakerMapFile`) so per-meeting identity data lives next to
+/// the recording. This struct now only holds central library metadata.
 struct MeetingOverride: Codable, Equatable, Sendable {
     var title: String?
     var tags: [String]
     var starred: Bool
-    /// Map of raw speaker id ("speaker_0") to display name ("Pim").
-    var customSpeakerNames: [String: String]
 
     init(
         title: String? = nil,
         tags: [String] = [],
-        starred: Bool = false,
-        customSpeakerNames: [String: String] = [:]
+        starred: Bool = false
     ) {
         self.title = title
         self.tags = tags
         self.starred = starred
-        self.customSpeakerNames = customSpeakerNames
+    }
+
+    /// Codable shape: tolerate extra/missing keys so legacy
+    /// `customSpeakerNames` data in existing library.json files
+    /// decodes cleanly (the field is simply ignored — the move to
+    /// speakers.json is one-way).
+    enum CodingKeys: String, CodingKey {
+        case title, tags, starred
     }
 }
 

@@ -188,7 +188,12 @@ final class AppState: ObservableObject {
         summaryGeneration[meeting.id] = .running
         do {
             let merged = try MergedTranscript.read(from: meeting.folder)
-            let summary = try await llm.generateSummary(transcript: merged)
+            let context = MeetingLLMContext(
+                transcript: merged,
+                speakerProfiles: meeting.speakerProfiles,
+                calendarEvent: meeting.calendarEvent
+            )
+            let summary = try await llm.generateSummary(context: context)
             try summary.write(to: meeting.folder)
             summaryGeneration[meeting.id] = .done(summary)
             library.rescan()

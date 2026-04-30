@@ -92,6 +92,39 @@ final class MeetingsLibrary: ObservableObject {
         rescan()
     }
 
+    /// Replace one speaker's profile in `<meeting>/speakers.json` and
+    /// rescan. The transform receives the existing profile (or a fresh
+    /// default seeded from the transcript's speaker label) so callers
+    /// can mutate just the field they care about — display name,
+    /// attendee mapping, etc. — without clobbering the others.
+    func updateSpeaker(
+        meeting id: MeetingRecord.ID,
+        speakerID: SpeakerID,
+        transform: (inout SpeakerProfile) -> Void
+    ) {
+        guard let meeting = meetings.first(where: { $0.id == id }) else { return }
+        var profiles = meeting.speakerProfiles
+        if let idx = profiles.firstIndex(where: { $0.id == speakerID }) {
+            transform(&profiles[idx])
+        } else {
+            // Loader always seeds a profile per transcript speaker, so
+            // this fallback only kicks in for IDs the transcript
+            // doesn't know about (shouldn't happen) — append rather
+            // than drop the edit.
+            var seed = SpeakerProfile(id: speakerID, displayName: speakerID.rawValue)
+            transform(&seed)
+            profiles.append(seed)
+        }
+        let file = SpeakerMapFile(speakers: profiles)
+        do {
+            try file.write(to: meeting.folder)
+        } catch {
+            NSLog("[Meeting/Library] speakers.json write failed: %@",
+                  String(describing: error))
+        }
+        rescan()
+    }
+
     /// Filtered + searched meetings used by the list column.
     var visibleMeetings: [MeetingRecord] {
         let bySidebar: [MeetingRecord]
@@ -148,10 +181,10 @@ final class MeetingsLibrary: ObservableObject {
         let folderName = folder.lastPathComponent
         let date = MeetingFolderName.date(from: folderName)
 
-        // Parse transcript.json for duration + speakers (optional — not all
-        // folders have one yet).
+        // Parse transcript.json for duration + raw speakers (optional —
+        // not all folders have one yet).
         var duration: TimeInterval?
-        var speakers: [Speaker] = []
+        var transcriptSpeakers: [Speaker] = []
         var speakerCount = 0
         var hasTranscript = false
 
@@ -161,11 +194,19 @@ final class MeetingsLibrary: ObservableObject {
             hasTranscript = true
             duration = merged.duration
             speakerCount = merged.speakers.count
-            speakers = merged.speakers.map { spk in
-                let custom = override?.customSpeakerNames[spk.id.rawValue]
-                return Speaker(id: spk.id, displayName: custom ?? spk.displayName)
-            }
+            transcriptSpeakers = merged.speakers
         }
+
+        // Layer in speakers.json — the per-meeting identity map. When
+        // missing, fall through to the transcript's default speaker
+        // labels (no legacy override merge: customSpeakerNames in
+        // library.json was retired when this file was introduced).
+        let storedMap = (try? SpeakerMapFile.read(from: folder).speakers) ?? []
+        let storedByID = Dictionary(uniqueKeysWithValues: storedMap.map { ($0.id, $0) })
+        let speakerProfiles: [SpeakerProfile] = transcriptSpeakers.map { spk in
+            storedByID[spk.id] ?? SpeakerProfile(id: spk.id, displayName: spk.displayName)
+        }
+        let speakers = speakerProfiles.map { $0.asSpeaker }
 
         // Parse marks.json (optional — older meetings predate U4).
         let marks = (try? MarksFile.read(from: folder).marks) ?? []
@@ -190,6 +231,7 @@ final class MeetingsLibrary: ObservableObject {
             duration: duration,
             speakerCount: speakerCount,
             speakers: speakers,
+            speakerProfiles: speakerProfiles,
             appName: nil,
             tags: override?.tags ?? [],
             starred: override?.starred ?? false,

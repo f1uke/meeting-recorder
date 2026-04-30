@@ -640,8 +640,8 @@ private struct SpeakersPanel: View {
                         },
                         onCommit: { commit(id: speaker.id) },
                         onPlaySample: { toggleSample(for: speaker.id) },
-                        onDropAttendee: speaker.id == .me ? nil : { name in
-                            apply(name: name, to: speaker.id)
+                        onDropAttendee: speaker.id == .me ? nil : { attendeeID in
+                            apply(attendeeID: attendeeID, to: speaker.id)
                         }
                     )
                 }
@@ -703,8 +703,11 @@ private struct SpeakersPanel: View {
             editingID = nil
             return
         }
-        library.update(meeting: meeting.id) { override in
-            override.customSpeakerNames[id.rawValue] = trimmed
+        // Manual rename only touches the display name — leave any
+        // existing attendee mapping (email, role) intact so a small
+        // typo fix doesn't unmap "Pim" from pim@finnomena.com.
+        library.updateSpeaker(meeting: meeting.id, speakerID: id) { profile in
+            profile.displayName = trimmed
         }
         editingID = nil
     }
@@ -721,10 +724,26 @@ private struct SpeakersPanel: View {
         }
     }
 
-    private func apply(name: String, to id: SpeakerID) {
-        library.update(meeting: meeting.id) { override in
-            override.customSpeakerNames[id.rawValue] = name
+    /// Drop handler: resolve the dragged attendee's id back to the full
+    /// `CalendarAttendee` from the meeting's calendar.json snapshot,
+    /// then write the whole identity bundle (display name + email +
+    /// role + attendee id) to speakers.json so the LLM prompt and
+    /// future cross-meeting analytics can attribute speech to a real
+    /// person rather than a name string.
+    private func apply(attendeeID: String, to id: SpeakerID) {
+        guard let attendee = lookupAttendee(id: attendeeID) else { return }
+        library.updateSpeaker(meeting: meeting.id, speakerID: id) { profile in
+            profile.displayName = attendee.displayName
+            profile.attendeeId = attendee.id
+            profile.email = attendee.email
+            profile.role = attendee.role
         }
+    }
+
+    private func lookupAttendee(id: String) -> CalendarAttendee? {
+        guard let event = meeting.calendarEvent else { return nil }
+        if let organizer = event.organizer, organizer.id == id { return organizer }
+        return event.attendees.first { $0.id == id }
     }
 }
 
@@ -891,8 +910,25 @@ private struct AttendeesPanel: View {
         }
     }
 
+    /// Set of `CalendarAttendee.id` values already mapped to a
+    /// speaker in this meeting. Drives the checkmark + dimmed style on
+    /// `AttendeePill` so the user can see who's been assigned.
+    /// Falls back to display-name match for legacy speakers.json
+    /// entries without an attendeeId.
+    private var assignedAttendeeIDs: Set<String> {
+        var ids = Set<String>()
+        for profile in meeting.speakerProfiles {
+            if let attendeeId = profile.attendeeId {
+                ids.insert(attendeeId)
+            }
+        }
+        return ids
+    }
+
     private var assignedNames: Set<String> {
-        Set(meeting.speakers.map { $0.displayName })
+        Set(meeting.speakerProfiles
+            .filter { $0.attendeeId == nil }
+            .map { $0.displayName })
     }
 
     var body: some View {
@@ -914,11 +950,17 @@ private struct AttendeesPanel: View {
                 if isExpanded {
                     FlowLayout(spacing: 6) {
                         ForEach(pool) { att in
+                            let isAssigned = assignedAttendeeIDs.contains(att.id)
+                                || assignedNames.contains(att.displayName)
                             AttendeePill(
                                 attendee: att,
-                                isAssigned: assignedNames.contains(att.displayName)
+                                isAssigned: isAssigned
                             )
-                            .draggable(att.displayName) {
+                            // Drag carries the attendee's stable id
+                            // (email-derived). The drop site looks up
+                            // the full record via meeting.calendarEvent
+                            // — a name string would lose email + role.
+                            .draggable(att.id) {
                                 AttendeePill(attendee: att, isAssigned: false)
                             }
                         }

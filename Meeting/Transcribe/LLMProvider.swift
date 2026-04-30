@@ -51,7 +51,17 @@ protocol LLMProvider: Sendable {
     /// key configured). Cheap — called from UI to disable / enable buttons.
     func availability() async -> LLMAvailability
 
-    func generateSummary(transcript: MergedTranscript) async throws -> Summary
+    func generateSummary(context: MeetingLLMContext) async throws -> Summary
+}
+
+/// Bundle handed to `LLMProvider.generateSummary`. Beyond the bare
+/// transcript, providers get the speaker→attendee mapping (so action
+/// items can reference real participants) and the calendar event
+/// (title + attendees give the model meeting purpose).
+struct MeetingLLMContext: Sendable {
+    let transcript: MergedTranscript
+    let speakerProfiles: [SpeakerProfile]
+    let calendarEvent: CalendarEvent?
 }
 
 enum LLMAvailability: Sendable, Equatable {

@@ -22,12 +22,12 @@ actor ClaudeCLIProvider: LLMProvider {
         return .available
     }
 
-    func generateSummary(transcript: MergedTranscript) async throws -> Summary {
+    func generateSummary(context: MeetingLLMContext) async throws -> Summary {
         guard let claudePath else {
             throw LLMError.notInstalled("which claude returned nothing")
         }
 
-        let prompt = Self.buildPrompt(transcript: transcript)
+        let prompt = Self.buildPrompt(context: context)
         let raw = try await Self.runClaude(at: claudePath, input: prompt)
         let inner = try Self.parseClaudeOutput(raw)
         let llmJSON = Self.stripJSONFences(inner)
@@ -90,20 +90,33 @@ actor ClaudeCLIProvider: LLMProvider {
         }
     }
 
-    private static func buildPrompt(transcript: MergedTranscript) -> String {
-        // Render transcript as readable markdown for Claude. Speaker names
-        // already have user overrides applied by MergedTranscript.speakers.
+    private static func buildPrompt(context: MeetingLLMContext) -> String {
+        let transcript = context.transcript
+
+        // Resolve display names from the speaker profiles when present
+        // — these reflect any rename / attendee mapping the user did.
+        // Falls back to the transcript's own speaker labels otherwise.
+        let nameByID: [SpeakerID: String] = {
+            var map = Dictionary(uniqueKeysWithValues: transcript.speakers.map { ($0.id, $0.displayName) })
+            for profile in context.speakerProfiles {
+                map[profile.id] = profile.displayName
+            }
+            return map
+        }()
+
         var body = ""
-        let nameByID = Dictionary(uniqueKeysWithValues: transcript.speakers.map { ($0.id, $0.displayName) })
         for seg in transcript.segments {
             let stamp = formatTimestamp(seg.start)
             let name = nameByID[seg.speaker] ?? seg.speaker.rawValue
             body += "[\(stamp)] **\(name)**: \(seg.text)\n\n"
         }
 
+        let metaSection = buildMetaSection(context: context)
+        let rosterSection = buildRosterSection(context: context)
+
         return """
         You are extracting structured insights from a meeting transcript.
-
+        \(metaSection)\(rosterSection)
         Read the transcript and respond with ONLY a JSON object — no prose,\
          no markdown fences, no explanation. The shape must be:
 
@@ -120,7 +133,7 @@ actor ClaudeCLIProvider: LLMProvider {
 
         Rules:
         - "actionItems" is an array of concrete commitments / TODOs from the meeting. Empty array if none.
-        - "speaker" matches a name from the transcript. Use "You" if the user (the one whose mic is recorded) committed to the action.
+        - "speaker" matches a display name from the Speakers roster above. Use "You" if the user (the one whose mic is recorded — the speaker labeled "Me") committed to the action.
         - "timestamp" is mm:ss or h:mm:ss matching the action's appearance in the transcript.
         - Match the transcript's primary language for "summary" and action item text.
 
@@ -128,6 +141,50 @@ actor ClaudeCLIProvider: LLMProvider {
 
         \(body)
         """
+    }
+
+    /// Calendar metadata block — gives Claude the meeting's purpose
+    /// before it sees the transcript so the summary frames things
+    /// correctly (e.g. a 1:1 vs a team standup vs a customer call).
+    /// Omitted entirely when there's no attached calendar event.
+    private static func buildMetaSection(context: MeetingLLMContext) -> String {
+        guard let event = context.calendarEvent else { return "" }
+        var lines: [String] = []
+        lines.append("Meeting: \(event.title)")
+        if let location = event.location, !location.isEmpty {
+            lines.append("Location: \(location)")
+        }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        lines.append("When: \(f.string(from: event.startDate))")
+        return "\n\n" + lines.joined(separator: "\n")
+    }
+
+    /// Speakers section — pairs each transcript label with the
+    /// calendar attendee they were mapped to (when known). Knowing
+    /// "Pim" is "Pim Lertpaitoonpan, organizer (chair)" lets Claude
+    /// attribute commitments to a real person, weight chair speech
+    /// differently when extracting decisions, and use full names in
+    /// the summary instead of bare nicknames.
+    private static func buildRosterSection(context: MeetingLLMContext) -> String {
+        guard !context.speakerProfiles.isEmpty else { return "" }
+        var lines: [String] = ["Speakers (transcript label → identity):"]
+        for profile in context.speakerProfiles {
+            var bits: [String] = []
+            if let email = profile.email, !email.isEmpty {
+                bits.append(email)
+            }
+            if let role = profile.role, !role.isEmpty, role != "unknown" {
+                bits.append(role)
+            }
+            if profile.id == .me {
+                bits.append("user — the one whose mic is recorded")
+            }
+            let suffix = bits.isEmpty ? "" : " — " + bits.joined(separator: ", ")
+            lines.append("- **\(profile.displayName)**\(suffix)")
+        }
+        return "\n\n" + lines.joined(separator: "\n")
     }
 
     private static func runClaude(at path: URL, input: String) async throws -> String {
