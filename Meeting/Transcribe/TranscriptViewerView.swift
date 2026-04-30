@@ -361,7 +361,11 @@ private struct TranscriptLeftColumn: View {
             .padding(.horizontal, 14)
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 12) {
-                    SpeakersPanel(meeting: meeting, transcript: transcript)
+                    SpeakersPanel(
+                        meeting: meeting,
+                        transcript: transcript,
+                        playerModel: playerModel
+                    )
                     AttendeesPanel(meeting: meeting)
                     MomentsPanel(meeting: meeting, playerModel: playerModel)
                 }
@@ -599,10 +603,12 @@ private struct FullscreenVideoOverlay: View {
 private struct SpeakersPanel: View {
     let meeting: MeetingRecord
     let transcript: MergedTranscript
+    @ObservedObject var playerModel: VideoPlayerModel
     @EnvironmentObject private var library: MeetingsLibrary
 
     @State private var editingID: SpeakerID?
     @State private var draftName: String = ""
+    @StateObject private var samplePlayer = SpeakerSamplePlayer()
     @AppStorage("transcript.viewer.expand.speakers") private var isExpanded: Bool = true
 
     var body: some View {
@@ -626,11 +632,14 @@ private struct SpeakersPanel: View {
                         speakingTime: speakingTime(for: speaker.id),
                         isEditing: editingID == speaker.id,
                         draftName: $draftName,
+                        sampleAvailable: sampleRange(for: speaker.id) != nil,
+                        isPlayingSample: samplePlayer.playingSpeaker == speaker.id,
                         onStartEdit: {
                             editingID = speaker.id
                             draftName = speaker.displayName
                         },
                         onCommit: { commit(id: speaker.id) },
+                        onPlaySample: { toggleSample(for: speaker.id) },
                         onDropAttendee: speaker.id == .me ? nil : { name in
                             apply(name: name, to: speaker.id)
                         }
@@ -642,12 +651,50 @@ private struct SpeakersPanel: View {
         .background {
             GlassCard(radius: 12) { Color.clear }
         }
+        .onDisappear { samplePlayer.stop() }
     }
 
     private func speakingTime(for id: SpeakerID) -> TimeInterval {
         transcript.segments
             .filter { $0.speaker == id }
             .reduce(0) { $0 + ($1.end - $1.start) }
+    }
+
+    /// Pick a representative speech range to play as the speaker sample.
+    /// Prefers the longest segment ≥ 2s (short utterances are rarely
+    /// recognizable as a voice); caps the sample at 6s so it doesn't
+    /// turn into a chunk of the meeting played back.
+    private func sampleRange(for id: SpeakerID) -> ClosedRange<TimeInterval>? {
+        let candidates = transcript.segments.filter { $0.speaker == id }
+        guard !candidates.isEmpty else { return nil }
+        let longish = candidates.filter { $0.end - $0.start >= 2.0 }
+        let pick = (longish.isEmpty ? candidates : longish)
+            .max(by: { ($0.end - $0.start) < ($1.end - $1.start) })
+        guard let pick else { return nil }
+        let maxLength: TimeInterval = 6
+        let length = min(pick.end - pick.start, maxLength)
+        return pick.start...(pick.start + length)
+    }
+
+    private func sampleAudioURL(for id: SpeakerID) -> URL {
+        let name = id == .me ? "mic.m4a" : "output.m4a"
+        return meeting.folder.appendingPathComponent(name)
+    }
+
+    private func toggleSample(for id: SpeakerID) {
+        if samplePlayer.playingSpeaker == id {
+            samplePlayer.stop()
+            return
+        }
+        guard let range = sampleRange(for: id) else { return }
+        // Pause main video so the sample plays cleanly — listening to
+        // both at the same time defeats the purpose.
+        playerModel.player?.pause()
+        samplePlayer.play(
+            speaker: id,
+            audioURL: sampleAudioURL(for: id),
+            range: range
+        )
     }
 
     private func commit(id: SpeakerID) {
@@ -686,8 +733,14 @@ private struct SpeakerRow: View {
     let speakingTime: TimeInterval
     let isEditing: Bool
     @Binding var draftName: String
+    /// True when there's a long-enough utterance from this speaker to
+    /// play back as a recognizable sample. Disables the play button
+    /// when false (e.g. transcript with only word-level fragments).
+    let sampleAvailable: Bool
+    let isPlayingSample: Bool
     let onStartEdit: () -> Void
     let onCommit: () -> Void
+    let onPlaySample: () -> Void
     /// Called when an AttendeePill is dropped on this row. nil to disable
     /// the drop target — used for the "Me" row, which is auto-mapped from
     /// the mic stream.
@@ -695,6 +748,7 @@ private struct SpeakerRow: View {
 
     @FocusState private var fieldFocused: Bool
     @State private var isDropTarget: Bool = false
+    @State private var isHoveringSample: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -713,6 +767,7 @@ private struct SpeakerRow: View {
                     .onTapGesture(perform: onStartEdit)
             }
             Spacer()
+            sampleButton
             Text(formatDuration(speakingTime))
                 .font(.system(size: 10.5, design: .monospaced))
                 .monospacedDigit()
@@ -736,6 +791,41 @@ private struct SpeakerRow: View {
             isTargeted: $isDropTarget,
             onDrop: { onDropAttendee?($0) }
         ))
+    }
+
+    /// Tiny play/stop button that auditions the speaker's voice. Stays
+    /// visible (but dimmed) when no sample is available so the row's
+    /// trailing layout doesn't shift between speakers.
+    @ViewBuilder
+    private var sampleButton: some View {
+        Button(action: onPlaySample) {
+            Image(systemName: isPlayingSample ? "stop.fill" : "play.fill")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(
+                    isPlayingSample ? Color.white : Color.brandAccent
+                )
+                .frame(width: 18, height: 18)
+                .background {
+                    Circle()
+                        .fill(
+                            isPlayingSample
+                                ? Color.brandAccent
+                                : Color.brandAccent.opacity(isHoveringSample ? 0.18 : 0.10)
+                        )
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!sampleAvailable)
+        .opacity(sampleAvailable ? 1.0 : 0.35)
+        .onHover { isHoveringSample = $0 }
+        .help(
+            isPlayingSample
+                ? "Stop sample"
+                : sampleAvailable
+                    ? "Play sample of \(speaker.displayName)'s voice"
+                    : "No long-enough utterance to sample"
+        )
     }
 
     private var initials: String {
@@ -957,26 +1047,55 @@ private struct TranscriptScrollPane: View {
     @ObservedObject var playerModel: VideoPlayerModel
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 14) {
-                heroBlock
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    heroBlock
 
-                ForEach(transcript.segments) { segment in
-                    SegmentRow(
-                        segment: segment,
-                        speakers: meeting.speakers,
-                        searchQuery: search,
-                        actionItem: actionItem(for: segment),
-                        onSeek: { playerModel.seek(to: segment.start) },
-                        onCommitEdit: { newText in
-                            transcript = transcript.updatingSegment(id: segment.id, text: newText)
-                        }
-                    )
+                    ForEach(transcript.segments) { segment in
+                        SegmentRow(
+                            segment: segment,
+                            speakers: meeting.speakers,
+                            searchQuery: search,
+                            actionItem: actionItem(for: segment),
+                            isActive: activeSegmentID == segment.id,
+                            onSeek: { playerModel.seek(to: segment.start) },
+                            onCommitEdit: { newText in
+                                transcript = transcript.updatingSegment(id: segment.id, text: newText)
+                            }
+                        )
+                        .id(segment.id)
+                    }
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 20)
+            }
+            .onChange(of: activeSegmentID) { _, newID in
+                // Only chase playback while the player is moving — if the
+                // user paused to read a different part of the transcript,
+                // don't yank them back to the playhead.
+                guard let newID, playerModel.isPlaying else { return }
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    proxy.scrollTo(newID, anchor: .center)
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 20)
         }
+    }
+
+    /// The segment whose [start, end) currently contains `currentTime`.
+    /// Falls back to the most recently started segment when between
+    /// two segments (e.g. silence) so the highlight doesn't blink off.
+    private var activeSegmentID: TranscriptSegment.ID? {
+        let now = playerModel.currentTime
+        let segments = transcript.segments
+        guard !segments.isEmpty else { return nil }
+        if let exact = segments.first(where: { $0.start <= now && now < $0.end }) {
+            return exact.id
+        }
+        // No exact hit (gap between segments) → highlight the last one
+        // that has already started. `segments` is sorted by start time
+        // by `TranscriptMerger.merge`, so the rightmost match wins.
+        return segments.last(where: { $0.start <= now })?.id
     }
 
     /// Match action items (from cached summary.json) to segments by
@@ -1030,35 +1149,49 @@ private struct SegmentRow: View {
     let speakers: [Speaker]
     let searchQuery: String
     let actionItem: ActionItem?
+    /// Highlights this row as the one currently being played. Drives the
+    /// brandAccent left rule, the row's tinted background fill, and the
+    /// "Now" pulse next to the timestamp.
+    let isActive: Bool
     let onSeek: () -> Void
     let onCommitEdit: (String) -> Void
 
     @State private var isEditing = false
     @State private var draft = ""
+    @State private var isHovering = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Avatar(initials: initials, color: speakerColor, size: 20)
-                    Text(displayName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.textPrimary)
-                        .lineLimit(1)
+            // The whole left column doubles as a "play from here" target —
+            // wrapping it in a Button makes the click region predictable
+            // (a Button consumes its own clicks, so the outer row tap
+            // gesture below doesn't double-fire).
+            Button(action: onSeek) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Avatar(initials: initials, color: speakerColor, size: 20)
+                        Text(displayName)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(isActive ? Color.brandAccent : Color.textPrimary)
+                            .lineLimit(1)
+                    }
+                    HStack(spacing: 4) {
+                        if isActive {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(Color.brandAccent)
+                        }
+                        Text(formatTimestamp(segment.start))
+                            .font(.system(size: 11, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(isActive ? Color.brandAccent : Color.textDim)
+                    }
+                    .padding(.leading, 22)
                 }
-                Button(action: onSeek) {
-                    Text(formatTimestamp(segment.start))
-                        .font(.system(size: 11, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundStyle(Color.textDim)
-                        .padding(.vertical, 2)
-                        .padding(.horizontal, 4)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, 22)
+                .frame(width: 110, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .frame(width: 110, alignment: .leading)
+            .buttonStyle(.plain)
 
             if isEditing {
                 editingBody
@@ -1069,6 +1202,11 @@ private struct SegmentRow: View {
                         .lineSpacing(4)
                         .foregroundStyle(Color.textPrimary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        // Double-tap edits; the surrounding row tap below
+                        // handles single-tap seek. SwiftUI prefers the
+                        // higher-count gesture when both are available
+                        // on the same hit, so a real double-click goes to
+                        // edit while a single click falls through to seek.
                         .onTapGesture(count: 2) {
                             draft = segment.text
                             isEditing = true
@@ -1091,12 +1229,17 @@ private struct SegmentRow: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { if !isEditing { onSeek() } }
             }
         }
-        .padding(.horizontal, actionItem != nil ? 16 : 0)
-        .padding(.vertical, actionItem != nil ? 12 : 0)
+        .padding(.horizontal, (actionItem != nil || isActive) ? 12 : 0)
+        .padding(.vertical, (actionItem != nil || isActive) ? 8 : 0)
         .background {
-            if actionItem != nil {
+            if isActive {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.brandAccent.opacity(0.10))
+            } else if actionItem != nil {
                 LinearGradient(
                     colors: [
                         Color.warmMark.opacity(0.15),
@@ -1105,15 +1248,24 @@ private struct SegmentRow: View {
                     startPoint: .leading, endPoint: .trailing
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else if isHovering {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.04))
             }
         }
         .overlay(alignment: .leading) {
-            if actionItem != nil {
+            if isActive {
+                Rectangle()
+                    .fill(Color.brandAccent)
+                    .frame(width: 2)
+            } else if actionItem != nil {
                 Rectangle()
                     .fill(Color.warmMark)
                     .frame(width: 2)
             }
         }
+        .animation(.easeInOut(duration: 0.18), value: isActive)
+        .onHover { isHovering = $0 }
     }
 
     private var editingBody: some View {
@@ -1266,7 +1418,15 @@ private struct LoadingTranscriptPlaceholder: View {
 final class VideoPlayerModel: ObservableObject {
     @Published private(set) var player: AVPlayer?
     @Published private(set) var loadError: String?
+    /// Current playback position in seconds. Updated ~5×/sec by a periodic
+    /// time observer while a player is attached. Drives the active-segment
+    /// highlight in the transcript scroll pane.
+    @Published private(set) var currentTime: TimeInterval = 0
+    /// True whenever AVPlayer.rate ≠ 0. Drives the auto-scroll-to-active
+    /// behavior — we only chase playback while it's actually moving.
+    @Published private(set) var isPlaying: Bool = false
     private var loadedFolder: URL?
+    private var rateObservation: NSKeyValueObservation?
 
     /// Build a player that plays `video.mov` with `mic.m4a` and
     /// `output.m4a` mixed in as parallel audio tracks. The recording
@@ -1298,13 +1458,45 @@ final class VideoPlayerModel: ObservableObject {
                     outputURL: outputExists ? outputURL : nil
                 )
                 let item = AVPlayerItem(asset: composition)
-                self.player = AVPlayer(playerItem: item)
+                let p = AVPlayer(playerItem: item)
+                self.player = p
+                self.attachObservers(to: p)
                 self.loadError = nil
             } catch {
                 NSLog("[Meeting/TranscriptViewer] composition build failed, falling back to video-only: %@",
                       String(describing: error))
-                self.player = AVPlayer(url: videoURL)
+                let p = AVPlayer(url: videoURL)
+                self.player = p
+                self.attachObservers(to: p)
                 self.loadError = nil
+            }
+        }
+    }
+
+    /// Wire up the periodic-time + rate observers. Old player and its
+    /// observers get released together when `self.player` is reassigned —
+    /// AVPlayer retains its periodic-observer block, so dropping the
+    /// player reference reaps the closure too. Only the KVO observation
+    /// is kept on `self`, which we explicitly invalidate below.
+    private func attachObservers(to p: AVPlayer) {
+        rateObservation?.invalidate()
+        let interval = CMTime(seconds: 0.2, preferredTimescale: 600)
+        p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            // Periodic observer's queue is .main, so we're already on
+            // MainActor — assumeIsolated lets us write @Published state
+            // without a Task hop.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let seconds = CMTimeGetSeconds(time)
+                if seconds.isFinite {
+                    self.currentTime = seconds
+                }
+            }
+        }
+        rateObservation = p.observe(\.rate, options: [.initial, .new]) { [weak self] _, change in
+            let isPlaying = (change.newValue ?? 0) != 0
+            Task { @MainActor [weak self] in
+                self?.isPlaying = isPlaying
             }
         }
     }
@@ -1375,6 +1567,63 @@ final class VideoPlayerModel: ObservableObject {
         let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance)
         player.play()
+    }
+}
+
+// =============================================================================
+// MARK: - Speaker sample player
+// =============================================================================
+
+/// Plays a short audio snippet for a single speaker (mic.m4a for "Me",
+/// output.m4a for diarized speakers) so the user can hear who they are
+/// while remapping. Auto-stops at the end of the requested range via a
+/// boundary-time observer; clicking play on a different speaker (or the
+/// same speaker again) cancels the in-flight playback first.
+@MainActor
+final class SpeakerSamplePlayer: ObservableObject {
+    @Published private(set) var playingSpeaker: SpeakerID?
+
+    private var player: AVPlayer?
+    private var endObserver: Any?
+
+    func play(speaker: SpeakerID, audioURL: URL, range: ClosedRange<TimeInterval>) {
+        stop()
+        guard FileManager.default.fileExists(
+            atPath: audioURL.path(percentEncoded: false)
+        ) else { return }
+
+        let item = AVPlayerItem(url: audioURL)
+        let p = AVPlayer(playerItem: item)
+        let start = CMTime(seconds: range.lowerBound, preferredTimescale: 600)
+        let end = CMTime(seconds: range.upperBound, preferredTimescale: 600)
+
+        let token = p.addBoundaryTimeObserver(
+            forTimes: [NSValue(time: end)],
+            queue: .main
+        ) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.playingSpeaker == speaker else { return }
+                self.stop()
+            }
+        }
+        endObserver = token
+        // Zero-tolerance seek matters for sample playback because the
+        // segment ranges come from word-level WhisperKit timestamps;
+        // a quarter-second of slop would clip the sample's first word.
+        p.seek(to: start, toleranceBefore: .zero, toleranceAfter: .zero)
+        p.play()
+        player = p
+        playingSpeaker = speaker
+    }
+
+    func stop() {
+        if let endObserver, let player {
+            player.removeTimeObserver(endObserver)
+        }
+        endObserver = nil
+        player?.pause()
+        player = nil
+        playingSpeaker = nil
     }
 }
 
