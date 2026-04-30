@@ -1149,6 +1149,10 @@ private struct CalendarDetailSection: View {
                                 attendees: event.attendees
                             )
                         }
+
+                        if !meeting.meetParticipants.isEmpty {
+                            meetParticipantsRow(names: meeting.meetParticipants)
+                        }
                     }
                     .padding(Tokens.cardPadding)
                 }
@@ -1200,6 +1204,72 @@ private struct CalendarDetailSection: View {
                     AttendeeChip(attendee: attendee)
                 }
             }
+        }
+    }
+
+    private func meetParticipantsRow(names: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text("Joined via Meet · \(names.count)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .kerning(0.6)
+                    .foregroundStyle(Color.textDim)
+                Image(systemName: "video.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.textDim)
+            }
+            FlowLayout(spacing: 6) {
+                ForEach(names, id: \.self) { name in
+                    MeetParticipantChip(name: name)
+                }
+            }
+        }
+    }
+}
+
+/// Slim chip for a Meet-scraped participant — no email/role/isMe data, just
+/// the display name as Meet's UI showed it. Visually distinct from
+/// AttendeeChip (calendar source) so the user can see at a glance which
+/// list a name came from.
+private struct MeetParticipantChip: View {
+    let name: String
+
+    private var initials: String {
+        let parts = name.split(separator: " ").prefix(2)
+        return parts.compactMap { $0.first.map { String($0) } }.joined().uppercased()
+    }
+
+    private var chipColor: Color {
+        // Stable per-name color via hash → tag palette. Cycles through 5
+        // hues so a long list of participants doesn't look monochrome.
+        let palette: [Color] = [
+            Color(red: 0.55, green: 0.45, blue: 0.85),
+            Color(red: 0.45, green: 0.65, blue: 0.85),
+            Color(red: 0.85, green: 0.55, blue: 0.45),
+            Color(red: 0.55, green: 0.75, blue: 0.55),
+            Color(red: 0.85, green: 0.65, blue: 0.55),
+        ]
+        let h = abs(name.hashValue)
+        return palette[h % palette.count]
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Avatar(initials: initials, color: chipColor, size: 16)
+            Text(name)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.textPrimary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background {
+            Capsule()
+                .fill(.regularMaterial)
+        }
+        .overlay {
+            Capsule()
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
         }
     }
 }

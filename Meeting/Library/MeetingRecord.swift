@@ -54,6 +54,14 @@ struct MeetingRecord: Identifiable, Equatable, Hashable, Sendable {
     /// speaker pre-fill suggestions.
     let calendarEvent: CalendarEvent?
 
+    /// Names captured by AX-scraping Meet's video tiles during the
+    /// recording, loaded from `<folder>/meet_participants.json`. Used in
+    /// the Library detail to surface who actually joined — meaningful
+    /// when the calendar invitee list contains a group email that
+    /// EventKit can't expand. Empty / nil when not Chrome+Meet or when
+    /// Accessibility permission was denied.
+    let meetParticipants: [String]
+
     var id: String { folder.lastPathComponent }
 }
 

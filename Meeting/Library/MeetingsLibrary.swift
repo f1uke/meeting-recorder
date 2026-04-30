@@ -218,6 +218,11 @@ final class MeetingsLibrary: ObservableObject {
         // time. Drives the title fallback chain (calendar > timestamp).
         let calendarEvent = (try? CalendarEventFile.read(from: folder).event)
 
+        // Names captured by AX-scraping Meet's video tiles during the
+        // recording — fills in the people that EventKit-only attendees
+        // couldn't enumerate (group invites, late joiners, etc.).
+        let meetParticipants = MeetParticipantsFile.read(from: folder)?.participants ?? []
+
         // Title precedence: explicit user override > calendar event title
         // > formatted folder timestamp.
         let derivedTitle = calendarEvent?.title ?? folderTitle(folderName: folderName, date: date)
@@ -238,7 +243,8 @@ final class MeetingsLibrary: ObservableObject {
             marks: marks,
             hasTranscript: hasTranscript,
             summary: summary,
-            calendarEvent: calendarEvent
+            calendarEvent: calendarEvent,
+            meetParticipants: meetParticipants
         )
     }
 

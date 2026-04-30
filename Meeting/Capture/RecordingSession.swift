@@ -52,6 +52,7 @@ final class RecordingSession: ObservableObject {
     private var processAudioTap: ProcessAudioTap?
     private var micGate: MicGate?
     private var micGateCancellable: AnyCancellable?
+    private var meetParticipants: MeetParticipantsCollector?
     private var currentFolder: URL?
 
     var isRecording: Bool {
@@ -216,6 +217,17 @@ final class RecordingSession: ObservableObject {
             NSLog("[Meeting/Session] start: step 4 skipped — no MicGate for bundle=%@ (or accessibility not granted)", bundleID)
         }
 
+        // Step 5: Meet participants AX scrape (Chrome only). Periodic
+        // capture of video tile names so the Library detail can show who
+        // actually joined — fills the gap when the calendar invitee list
+        // contains only a group email (which EventKit can't expand).
+        if bundleID == "com.google.Chrome", AXIsProcessTrusted() {
+            let collector = MeetParticipantsCollector(pid: targetPID)
+            collector.start()
+            self.meetParticipants = collector
+            NSLog("[Meeting/Session] start: step 5 done — MeetParticipantsCollector active")
+        }
+
         cancelStartWatchdog()
         NSLog("[Meeting/Session] start: ALL READY — state=recording")
     }
@@ -230,6 +242,8 @@ final class RecordingSession: ObservableObject {
         micGate = nil
         micGateCancellable = nil
         micGateState = nil
+        meetParticipants?.stop()
+        meetParticipants = nil
         micRecorder?.stop()
         micRecorder = nil
         processAudioTap?.stop()
@@ -301,6 +315,13 @@ final class RecordingSession: ObservableObject {
         micGateCancellable = nil
         micGateState = nil
 
+        // Stop Meet participants collector and capture its accumulated set.
+        // Final scrape happens below — by stopping the timer first we
+        // prevent a race where another scrape starts while we read the set.
+        meetParticipants?.stop()
+        let participantNames = meetParticipants?.allParticipants ?? []
+        meetParticipants = nil
+
         // Stop audio sources next so each m4a's moov atom is finalized
         // before we tear down the recording session.
         micRecorder?.stop()
@@ -337,6 +358,21 @@ final class RecordingSession: ObservableObject {
                           gateFile.muted.count, gateFile.totalMutedDuration)
                 } catch {
                     NSLog("[Meeting/Session] mic_gate.json write failed: %@",
+                          String(describing: error))
+                }
+            }
+
+            // meet_participants.json — only written if the AX scraper
+            // captured at least one tile name during the session. Empty
+            // file is the same as no file from the consumer's POV; we
+            // skip the disk hit.
+            if !participantNames.isEmpty {
+                do {
+                    try MeetParticipantsFile(participants: participantNames).write(to: folder)
+                    NSLog("[Meeting/Session] meet_participants.json written: %d names",
+                          participantNames.count)
+                } catch {
+                    NSLog("[Meeting/Session] meet_participants.json write failed: %@",
                           String(describing: error))
                 }
             }
