@@ -34,6 +34,11 @@ final class RecordingSession: ObservableObject {
     /// Number of audio process objects bridged by the output tap. Surfaced
     /// to confirm Electron multi-helper detection is wired up.
     @Published private(set) var tapProcessCount: Int = 0
+    /// Mic-gate detection state — drives the menu bar mic-gate icon.
+    /// `nil` when no gate is active for this recording (non-Chrome target,
+    /// Accessibility not granted, or before/after recording). Otherwise
+    /// mirrors `MicGate.detectionState` published from the gate.
+    @Published private(set) var micGateState: MicGateDetectionState?
 
     /// Live mic-level ring buffer — the popover and recording window read
     /// from this each frame to draw the user's waveform. Survives recorder
@@ -45,6 +50,8 @@ final class RecordingSession: ObservableObject {
     private var coordinator: ScreenCaptureCoordinator?
     private var micRecorder: MicRecorder?
     private var processAudioTap: ProcessAudioTap?
+    private var micGate: MicGate?
+    private var micGateCancellable: AnyCancellable?
     private var currentFolder: URL?
 
     var isRecording: Bool {
@@ -186,7 +193,29 @@ final class RecordingSession: ObservableObject {
 
         currentSourceTitle = window.title
         currentSourceApp = appName
-        state = .recording(folder: folder, started: Date())
+        let recordingStart = Date()
+        state = .recording(folder: folder, started: recordingStart)
+
+        // Step 4: mic gate (optional). Watches the meeting app's UI to know
+        // when the user has muted themselves in Meet, so the transcription
+        // pipeline can later silence Whisper's input over those intervals.
+        // Failure here is non-fatal — recording proceeds without gating.
+        if let gate = MicGate.create(forBundleID: bundleID, pid: targetPID) {
+            gate.start(sessionStart: recordingStart)
+            self.micGate = gate
+            // Mirror the gate's detection state into our own @Published so
+            // MenuBarLabel (which observes RecordingSession) can react —
+            // an inner ObservableObject would not republish through a
+            // parent's @Published of a class.
+            self.micGateState = gate.detectionState
+            self.micGateCancellable = gate.$detectionState.sink { [weak self] state in
+                self?.micGateState = state
+            }
+            NSLog("[Meeting/Session] start: step 4 done — MicGate active for bundle=%@", bundleID)
+        } else {
+            NSLog("[Meeting/Session] start: step 4 skipped — no MicGate for bundle=%@ (or accessibility not granted)", bundleID)
+        }
+
         cancelStartWatchdog()
         NSLog("[Meeting/Session] start: ALL READY — state=recording")
     }
@@ -197,6 +226,10 @@ final class RecordingSession: ObservableObject {
     func cancelStart() {
         NSLog("[Meeting/Session] cancelStart from state=%@",
               String(describing: state))
+        _ = micGate?.stop()
+        micGate = nil
+        micGateCancellable = nil
+        micGateState = nil
         micRecorder?.stop()
         micRecorder = nil
         processAudioTap?.stop()
@@ -261,7 +294,14 @@ final class RecordingSession: ObservableObject {
         guard case .recording = state else { return }
         state = .stopping
 
-        // Stop audio sources first so each m4a's moov atom is finalized
+        // Stop the mic gate first so any still-open mute interval gets
+        // closed against the same wall clock as the audio finalize.
+        let gateFile = micGate?.stop()
+        micGate = nil
+        micGateCancellable = nil
+        micGateState = nil
+
+        // Stop audio sources next so each m4a's moov atom is finalized
         // before we tear down the recording session.
         micRecorder?.stop()
         micRecorder = nil
@@ -285,6 +325,20 @@ final class RecordingSession: ObservableObject {
             } catch {
                 NSLog("[Meeting/Session] marks.json write failed: %@",
                       String(describing: error))
+            }
+
+            // mic_gate.json — only written when the gate actually ran for
+            // this session. Absence is the canonical "no gating data"
+            // signal that TranscriptionSession checks for.
+            if let gateFile, !gateFile.muted.isEmpty {
+                do {
+                    try gateFile.write(to: folder)
+                    NSLog("[Meeting/Session] mic_gate.json written: %d intervals, %.1fs muted total",
+                          gateFile.muted.count, gateFile.totalMutedDuration)
+                } catch {
+                    NSLog("[Meeting/Session] mic_gate.json write failed: %@",
+                          String(describing: error))
+                }
             }
 
             // Persist the attached calendar event (if any) so the Library

@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ApplicationServices
 import AVFoundation
 import CoreGraphics
 import CoreAudio
@@ -9,6 +10,11 @@ enum Permission: String, CaseIterable, Identifiable, Sendable {
     case screenRecording
     case microphone
     case audioCapture
+    /// Optional — needed only for `MicGate` to read Google Meet's mic-button
+    /// state via the AX API and skip transcribing muted intervals. Without
+    /// it the app records and transcribes normally; only the mute-skip
+    /// optimisation goes silent.
+    case accessibility
     /// Optional — calendar integration is a quality-of-life feature, not
     /// a recording requirement. Shown in the permission gate but excluded
     /// from `PermissionStatus.allGranted` so it never blocks recording.
@@ -21,6 +27,7 @@ enum Permission: String, CaseIterable, Identifiable, Sendable {
         case .screenRecording: "Screen Recording"
         case .microphone: "Microphone"
         case .audioCapture: "Audio Capture (Core Audio Tap)"
+        case .accessibility: "Accessibility (optional)"
         case .calendar: "Calendar (optional)"
         }
     }
@@ -30,15 +37,16 @@ enum Permission: String, CaseIterable, Identifiable, Sendable {
         case .screenRecording: "บันทึกหน้าต่างที่เลือก (ScreenCaptureKit)"
         case .microphone: "บันทึกเสียงไมค์ของคุณ"
         case .audioCapture: "ดักเสียงเฉพาะของแอพประชุม (Zoom/Meet)"
+        case .accessibility: "อ่านสถานะปุ่ม mic ของ Google Meet เพื่อข้าม transcribe ตอนปิดไมค์ — ไม่บังคับ"
         case .calendar: "ใช้ชื่อนัดและรายชื่อผู้เข้าร่วมจาก Calendar.app — ไม่บังคับ"
         }
     }
 
     /// Whether recording is allowed to start without this permission.
-    /// Calendar is the only optional one today.
+    /// Calendar and Accessibility are optional today.
     var isRequired: Bool {
         switch self {
-        case .calendar: false
+        case .calendar, .accessibility: false
         default: true
         }
     }
@@ -48,10 +56,11 @@ struct PermissionStatus: Equatable, Sendable {
     var screenRecording: Bool = false
     var microphone: Bool = false
     var audioCapture: Bool = false
+    var accessibility: Bool = false
     var calendar: Bool = false
 
-    /// True when every *required* permission is granted. Calendar is
-    /// optional and intentionally not part of this gate.
+    /// True when every *required* permission is granted. Calendar and
+    /// Accessibility are optional and intentionally not part of this gate.
     var allGranted: Bool {
         screenRecording && microphone && audioCapture
     }
@@ -61,6 +70,7 @@ struct PermissionStatus: Equatable, Sendable {
         case .screenRecording: screenRecording
         case .microphone: microphone
         case .audioCapture: audioCapture
+        case .accessibility: accessibility
         case .calendar: calendar
         }
     }
@@ -75,6 +85,7 @@ enum PermissionManager {
                 screenRecording: CGPreflightScreenCaptureAccess(),
                 microphone: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
                 audioCapture: UserDefaults.standard.bool(forKey: audioCaptureGrantedKey) && probeAudioCapture(),
+                accessibility: AXIsProcessTrusted(),
                 calendar: calendarAuthorized()
             )
         }.value
@@ -97,6 +108,23 @@ enum PermissionManager {
                 probeAudioCapture()
             }.value
             UserDefaults.standard.set(granted, forKey: audioCaptureGrantedKey)
+
+        case .accessibility:
+            // AXIsProcessTrustedWithOptions(prompt=true) shows the system
+            // "open System Settings" dialog if the app isn't already trusted;
+            // it never returns true on the same call (the user has to flip
+            // the toggle in Settings and we re-check via Refresh). The call
+            // returns synchronously — the Task.detached just keeps the
+            // call off the main thread as a precaution.
+            //
+            // `kAXTrustedCheckOptionPrompt` is a global CFString constant
+            // imported as `var` so Swift 6 strict concurrency rejects it as
+            // shared mutable state; hard-coding the literal key dodges the
+            // diagnostic without any behavioural change.
+            await Task.detached(priority: .userInitiated) {
+                let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+                _ = AXIsProcessTrustedWithOptions(options)
+            }.value
 
         case .calendar:
             await requestCalendar()

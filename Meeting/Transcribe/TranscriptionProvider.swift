@@ -69,19 +69,27 @@ struct TranscriptionOptions: Sendable {
     /// (pyannote default). Set to 1 for solo monologues; set to a known small
     /// number when over-segmentation is splitting one voice across labels.
     var expectedSpeakerCount: Int?
+    /// Time ranges (in seconds since audio start) whose audio should be
+    /// silenced before Whisper sees it. Used to skip muted-mic regions so
+    /// the model doesn't hallucinate boilerplate over echo / ambient noise.
+    /// `nil` or empty = no gating (the file is transcribed as-is). Providers
+    /// that can't honor this fall back to ungated transcription.
+    var mutedIntervals: [MutedInterval]?
 
     init(
         language: String? = nil,
         withDiarization: Bool = false,
         knownSpeaker: SpeakerID? = nil,
         source: AudioSource,
-        expectedSpeakerCount: Int? = nil
+        expectedSpeakerCount: Int? = nil,
+        mutedIntervals: [MutedInterval]? = nil
     ) {
         self.language = language
         self.withDiarization = withDiarization
         self.knownSpeaker = knownSpeaker
         self.source = source
         self.expectedSpeakerCount = expectedSpeakerCount
+        self.mutedIntervals = mutedIntervals
     }
 }
 

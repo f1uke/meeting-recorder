@@ -67,13 +67,37 @@ actor LocalProvider: TranscriptionProvider {
         } else {
             whisperReporter = nil
         }
-        let chunks = try await Self.runTranscribe(
-            box: kit,
-            audioPath: path,
-            language: options.language,
-            providerName: name,
-            onProgress: whisperReporter
-        )
+
+        let chunks: [TranscriptionResult]
+        if let muted = options.mutedIntervals, !muted.isEmpty {
+            // Mic gating path: load the file as a 16 kHz mono float array,
+            // zero out the muted ranges in place, then feed Whisper the
+            // already-silenced array. WhisperKit's VAD chunker will skip
+            // those zeroed regions naturally — no boilerplate hallucinations.
+            // Output (meeting) audio never goes through this branch; only
+            // mic.m4a carries `mutedIntervals` from MicGate.
+            var audio = try Self.loadAudioArray(path: path, providerName: name)
+            Self.applyGate(to: &audio, sampleRate: 16000, mutedIntervals: muted)
+            NSLog("[Meeting/Transcribe] mic gate applied: %d intervals → %.1fs of %.1fs zeroed",
+                  muted.count,
+                  muted.reduce(0) { $0 + ($1.end - $1.start) },
+                  Double(audio.count) / 16000)
+            chunks = try await Self.runTranscribeArray(
+                box: kit,
+                audioArray: audio,
+                language: options.language,
+                providerName: name,
+                onProgress: whisperReporter
+            )
+        } else {
+            chunks = try await Self.runTranscribe(
+                box: kit,
+                audioPath: path,
+                language: options.language,
+                providerName: name,
+                onProgress: whisperReporter
+            )
+        }
 
         if options.withDiarization {
             let dia = try await loadDiarizer()
@@ -217,6 +241,83 @@ actor LocalProvider: TranscriptionProvider {
 
         do {
             return try await box.kit.transcribe(audioPath: audioPath, decodeOptions: decode)
+        } catch {
+            throw TranscriptionError.providerFailed(providerName, underlying: error)
+        }
+    }
+
+    /// Load the file as 16 kHz mono float array via WhisperKit's helper —
+    /// shares the same resampling path Whisper would use internally so the
+    /// gated array sees identical audio to the file-path code path.
+    private static func loadAudioArray(path: String, providerName: String) throws -> [Float] {
+        do {
+            return try AudioProcessor.loadAudioAsFloatArray(
+                fromPath: path,
+                channelMode: .sumChannels(nil)
+            )
+        } catch {
+            throw TranscriptionError.providerFailed(providerName, underlying: error)
+        }
+    }
+
+    /// Zero-fill samples that fall inside any muted interval. Operates in
+    /// place so a 1-hour mic file (~57 MB float array) doesn't double its
+    /// memory footprint during the copy.
+    private static func applyGate(
+        to audio: inout [Float],
+        sampleRate: Double,
+        mutedIntervals: [MutedInterval]
+    ) {
+        for interval in mutedIntervals {
+            let startSample = max(0, Int(interval.start * sampleRate))
+            let endSample = min(audio.count, Int(interval.end * sampleRate))
+            guard startSample < endSample else { continue }
+            for i in startSample..<endSample {
+                audio[i] = 0
+            }
+        }
+    }
+
+    private static func runTranscribeArray(
+        box: KitBox,
+        audioArray: [Float],
+        language: String?,
+        providerName: String,
+        onProgress: (@Sendable (Double) -> Void)?
+    ) async throws -> [TranscriptionResult] {
+        // DecodingOptions intentionally identical to the audioPath path so
+        // gated and ungated transcripts are byte-comparable wherever the
+        // audio itself matches.
+        let decode = DecodingOptions(
+            verbose: false,
+            task: .transcribe,
+            language: language,
+            skipSpecialTokens: true,
+            withoutTimestamps: false,
+            wordTimestamps: true,
+            chunkingStrategy: .vad
+        )
+
+        let baseCompleted = box.kit.progress.completedUnitCount
+        let baseTotal = box.kit.progress.totalUnitCount
+
+        let pollerTask: Task<Void, Never>? = onProgress.map { report in
+            Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    let p = box.kit.progress
+                    let completed = p.completedUnitCount - baseCompleted
+                    let total = p.totalUnitCount - baseTotal
+                    guard total > 0 else { continue }
+                    let f = max(0.0, min(1.0, Double(completed) / Double(total)))
+                    report(f)
+                }
+            }
+        }
+        defer { pollerTask?.cancel() }
+
+        do {
+            return try await box.kit.transcribe(audioArray: audioArray, decodeOptions: decode)
         } catch {
             throw TranscriptionError.providerFailed(providerName, underlying: error)
         }

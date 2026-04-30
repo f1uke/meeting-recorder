@@ -98,6 +98,11 @@ final class TranscriptionSession: ObservableObject {
         // misclassification problem on the turbo variant.
         let languageCode = AppPreferences.shared.transcriptionLanguage.whisperCode
 
+        // Pick up the mic gate sidecar (if MicGate ran during recording) so
+        // we can silence Whisper's input over Meet-muted intervals — kills
+        // the boilerplate hallucinations Whisper emits on echo / silence.
+        let micGateIntervals = MicGateFile.read(from: meetingFolder)?.muted
+
         do {
             enter(stage: .transcribingMic, fraction: 0)
             let mic = try await provider.transcribe(
@@ -106,7 +111,8 @@ final class TranscriptionSession: ObservableObject {
                     language: languageCode,
                     withDiarization: false,
                     knownSpeaker: .me,
-                    source: .mic
+                    source: .mic,
+                    mutedIntervals: micGateIntervals
                 ),
                 progress: makeProgressReporter(for: .transcribingMic)
             )

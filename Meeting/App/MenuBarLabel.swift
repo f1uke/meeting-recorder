@@ -24,6 +24,9 @@ struct MenuBarLabel: View {
                         .monospacedDigit()
                         .font(.system(size: 13, weight: .medium))
                 }
+                if let gateState = recording.micGateState {
+                    micGateIcon(for: gateState)
+                }
             }
             .font(.system(size: 13))
 
@@ -37,6 +40,35 @@ struct MenuBarLabel: View {
         default:
             Image(systemName: "mic.fill")
                 .font(.system(size: 13))
+        }
+    }
+
+    /// Tiny status badge that mirrors what the Meet mic-gate detector is
+    /// currently reading. Color/icon picked so the user can tell at a
+    /// glance from across the room which of the four states is live —
+    /// green = recording your voice, red = silenced, yellow = something
+    /// is wrong with detection.
+    @ViewBuilder
+    private func micGateIcon(for state: MicGateDetectionState) -> some View {
+        switch state {
+        case .awaitingDetection:
+            Image(systemName: "mic.fill")
+                .foregroundStyle(.gray)
+                .help("Looking for Meet mic button…")
+        case .detected(let isMicActive):
+            if isMicActive {
+                Image(systemName: "mic.fill")
+                    .foregroundStyle(.green)
+                    .help("Mic is on — voice will be transcribed")
+            } else {
+                Image(systemName: "mic.slash.fill")
+                    .foregroundStyle(.red)
+                    .help("Mic is muted in Meet — this audio will be skipped from the transcript")
+            }
+        case .lost:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+                .help("Mic detection lost — open the Meet tab or PiP to resume tracking")
         }
     }
 }
