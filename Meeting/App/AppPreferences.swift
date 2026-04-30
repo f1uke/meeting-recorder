@@ -126,7 +126,7 @@ final class AppPreferences: ObservableObject {
         self.geminiAPIKey = UserDefaults.standard.string(forKey: Keys.geminiAPIKey) ?? ""
         self.geminiModel = GeminiModel(
             rawValue: UserDefaults.standard.string(forKey: Keys.geminiModel) ?? ""
-        ) ?? .flash
+        ) ?? .pro
         self.openaiAPIKey = UserDefaults.standard.string(forKey: Keys.openaiAPIKey) ?? ""
         self.openaiModel = OpenAIModel(
             rawValue: UserDefaults.standard.string(forKey: Keys.openaiModel) ?? ""
@@ -398,11 +398,11 @@ enum GeminiModel: String, CaseIterable, Identifiable, Sendable {
     var description: String {
         switch self {
         case .flash:
-            "Default. Fast and cheap; can hit 503 UNAVAILABLE on free tier under load."
+            "Fast and cheap. Acceptable on short, clear English audio; quality drops noticeably on Thai-English code-switching versus Pro."
         case .flashLite:
-            "Smaller, cheaper, sometimes less contended than Flash. Lower transcription quality."
+            "Smallest, cheapest. Lowest transcription quality of the three — fine for quick previews, not production transcripts."
         case .pro:
-            "Strongest model. Slower and more expensive, but a separate capacity pool — useful when Flash is overloaded."
+            "Default. Highest transcription quality on Thai-English code-switching content in our testing — beats Flash, Flash-Lite, and every OpenAI model. Slower and more expensive per request, on a separate capacity pool from Flash."
         }
     }
 }
