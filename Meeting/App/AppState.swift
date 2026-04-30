@@ -15,6 +15,14 @@ final class AppState: ObservableObject {
     /// Window picker model lives at app scope so the menu-bar popover and
     /// the standalone picker window share the same selection state.
     let picker: WindowPickerModel
+    /// Calendar event index. Lives at app scope so the popover, recording
+    /// window, and any future "today's agenda" view share one cached
+    /// snapshot of the user's upcoming/current events.
+    let calendar: CalendarStore
+    /// Schedules "starts in 5 min" UNUserNotifications based on
+    /// `calendar.upcomingEvents`. Owns no UI — `AppDelegate` handles the
+    /// tap action via the shared `UNUserNotificationCenterDelegate`.
+    let notifier: CalendarNotifier
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
 
@@ -37,10 +45,19 @@ final class AppState: ObservableObject {
         self.toast = ToastPresenter()
         self.llm = ClaudeCLIProvider()
         self.picker = WindowPickerModel()
+        self.calendar = CalendarStore()
+        self.notifier = CalendarNotifier(calendar: calendar)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.llmAvailability = await self.llm.availability()
+            // Ask for notification permission lazily — only once we
+            // have calendar access (otherwise there's nothing to notify
+            // about). Safe to call repeatedly; the system caches the
+            // user's prior answer.
+            if self.calendar.authorization == .authorized {
+                await self.notifier.requestAuthorizationIfNeeded()
+            }
         }
     }
 
@@ -61,6 +78,16 @@ final class AppState: ObservableObject {
     func request(_ permission: Permission) async {
         await PermissionManager.request(permission)
         await refreshPermissions()
+        if permission == .calendar {
+            // Always refresh so CalendarStore.authorization picks up the
+            // result (granted *or* denied) — its init reads the status
+            // once and never sees changes that come through this code
+            // path (which uses PermissionManager's own EKEventStore).
+            calendar.refresh()
+            if permissions.calendar {
+                await notifier.requestAuthorizationIfNeeded()
+            }
+        }
     }
 
     /// Stop the active recording without running transcription. Used when

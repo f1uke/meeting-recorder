@@ -10,9 +10,19 @@ struct PopoverIdleView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var recording: RecordingSession
     @EnvironmentObject private var picker: WindowPickerModel
+    @EnvironmentObject private var calendar: CalendarStore
     @ObservedObject private var prefs = AppPreferences.shared
 
     @Environment(\.openWindow) private var openWindow
+
+    /// User-attached calendar event for this recording. Auto-populated by
+    /// `CalendarMatcher` when the window picker selection changes; the
+    /// user can switch events or detach via the card.
+    @State private var selectedEvent: CalendarEvent?
+    /// Tracks whether `selectedEvent` was auto-picked. Once the user
+    /// manually picks (or detaches) an event, we stop overwriting their
+    /// choice when the matcher rescores.
+    @State private var eventIsAutoSelected = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -31,6 +41,8 @@ struct PopoverIdleView: View {
                     }
                 }
             )
+
+            calendarSection
 
             VStack(alignment: .leading, spacing: 6) {
                 SectionLabel(text: "Source")
@@ -61,11 +73,181 @@ struct PopoverIdleView: View {
                 await picker.refresh()
             }
         }
+        .onChange(of: picker.selectedWindow?.windowID) { _, _ in
+            autoPickEventIfNeeded()
+        }
+        .onChange(of: calendar.relevantEvents) { _, _ in
+            autoPickEventIfNeeded()
+        }
+        .onChange(of: selectedEvent?.id) { _, _ in
+            // If the user picked or detached the event manually, treat
+            // it as sticky — don't auto-overwrite on the next match cycle.
+            // We can't tell "user changed it" vs "matcher changed it"
+            // directly; use a small state flag set by the card actions.
+        }
+        .onAppear {
+            autoPickEventIfNeeded()
+        }
+    }
+
+    @ViewBuilder
+    private var calendarSection: some View {
+        switch calendar.authorization {
+        case .authorized:
+            CalendarNowCard(
+                events: calendar.relevantEvents,
+                selectedEvent: Binding(
+                    get: { selectedEvent },
+                    set: { newValue in
+                        // Any binding write from the card is by definition
+                        // user-initiated — make the choice sticky.
+                        selectedEvent = newValue
+                        eventIsAutoSelected = false
+                    }
+                )
+            )
+        case .notDetermined:
+            CalendarPermissionPromptCard(
+                state: .notDetermined,
+                onAllow: {
+                    Task { await appState.request(.calendar) }
+                }
+            )
+        case .denied, .writeOnly:
+            CalendarPermissionPromptCard(
+                state: .denied,
+                onAllow: {
+                    // Re-prompt path: even though the system has us as
+                    // .denied, this triggers an EventKit query that
+                    // refreshes our local cache; if the user enabled
+                    // access externally (System Settings, tccutil)
+                    // CalendarStore picks it up.
+                    Task { await appState.request(.calendar) }
+                }
+            )
+        }
+    }
+
+    private func autoPickEventIfNeeded() {
+        guard eventIsAutoSelected else { return }
+        let bundleID = picker.selectedWindow?.owningApplication?.bundleIdentifier
+        let best = CalendarMatcher.bestMatch(
+            events: calendar.relevantEvents,
+            now: Date(),
+            windowBundleID: bundleID
+        )
+        selectedEvent = best?.event
     }
 
     private func startRecording() {
         guard let win = picker.selectedWindow else { return }
-        Task { await recording.start(window: win) }
+        let event = selectedEvent
+        Task { await recording.start(window: win, event: event) }
+    }
+}
+
+/// Compact card prompting for calendar access. Two states:
+///   - `.notDetermined` — the user has never been asked. Allow triggers
+///     the in-app TCC prompt path.
+///   - `.denied` — the user (or the system) said no previously, so
+///     `EKEventStore.requestFullAccessToEvents` will return immediately
+///     without re-prompting. We surface the System Settings deep link
+///     as the only working escape hatch.
+///
+/// The "Open System Settings" link appears in *both* states because some
+/// menu-bar (`.accessory`) apps don't reliably get a TCC dialog even
+/// with `NSApp.activate()` — giving the user a manual path means the
+/// feature is still reachable when EventKit's auto-prompt misfires.
+private struct CalendarPermissionPromptCard: View {
+    enum State { case notDetermined, denied }
+
+    let state: State
+    let onAllow: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: state == .denied ? "calendar.badge.exclamationmark" : "calendar")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(state == .denied ? Color.warmMark : Color.brandAccent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(titleText)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.textPrimary)
+                    Text(detailText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textDim)
+                        .lineLimit(3)
+                }
+                Spacer(minLength: 6)
+                if state == .notDetermined {
+                    Button(action: onAllow) {
+                        Text("Allow")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background {
+                                Capsule().fill(LinearGradient(
+                                    colors: [Color.brandAccent, Color.brandAccentStrong],
+                                    startPoint: .top, endPoint: .bottom
+                                ))
+                            }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Button(action: openCalendarSettings) {
+                HStack(spacing: 4) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 9))
+                    Text(state == .denied ? "Open System Settings" : "Or open System Settings")
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 8, weight: .bold))
+                }
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.brandAccent)
+                .padding(.leading, 24)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(10)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            (state == .denied ? Color.warmMark : Color.brandAccent).opacity(0.30),
+                            lineWidth: 0.5
+                        )
+                }
+        }
+    }
+
+    private var titleText: String {
+        switch state {
+        case .notDetermined: "Connect Apple Calendar"
+        case .denied: "Calendar access blocked"
+        }
+    }
+
+    private var detailText: String {
+        switch state {
+        case .notDetermined:
+            "Pre-fill meeting titles and attendees from your calendar."
+        case .denied:
+            "Enable Meeting under Privacy & Security → Calendars to use event titles and attendee lists."
+        }
+    }
+
+    private func openCalendarSettings() {
+        // Direct deep link to Privacy → Calendars in System Settings.
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 
@@ -119,6 +301,25 @@ struct PopoverRecordingView: View {
                 Text(started, style: .timer)
                     .font(.mono(13, weight: .semibold))
                     .foregroundStyle(Color.textPrimary)
+            }
+
+            if let event = recording.currentEvent {
+                HStack(spacing: 6) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.brandAccent)
+                    Text(event.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    let count = event.totalAttendeeCount
+                    if count > 0 {
+                        Text("· \(count) attendee\(count == 1 ? "" : "s")")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.textDim)
+                    }
+                }
             }
 
             if let title = sourceLabel {

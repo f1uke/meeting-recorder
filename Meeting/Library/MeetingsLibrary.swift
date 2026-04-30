@@ -173,13 +173,20 @@ final class MeetingsLibrary: ObservableObject {
         // Load cached LLM summary if previously generated (U8b).
         let summary = try? Summary.read(from: folder)
 
-        let title = override?.title ?? folderTitle(folderName: folderName, date: date)
+        // Load attached calendar event if the user picked one at record
+        // time. Drives the title fallback chain (calendar > timestamp).
+        let calendarEvent = (try? CalendarEventFile.read(from: folder).event)
+
+        // Title precedence: explicit user override > calendar event title
+        // > formatted folder timestamp.
+        let derivedTitle = calendarEvent?.title ?? folderTitle(folderName: folderName, date: date)
+        let title = override?.title ?? derivedTitle
 
         return MeetingRecord(
             folder: folder,
             recordedAt: date,
             title: title,
-            originalTitle: override?.title == nil ? nil : folderTitle(folderName: folderName, date: date),
+            originalTitle: override?.title == nil ? nil : derivedTitle,
             duration: duration,
             speakerCount: speakerCount,
             speakers: speakers,
@@ -188,7 +195,8 @@ final class MeetingsLibrary: ObservableObject {
             starred: override?.starred ?? false,
             marks: marks,
             hasTranscript: hasTranscript,
-            summary: summary
+            summary: summary,
+            calendarEvent: calendarEvent
         )
     }
 

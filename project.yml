@@ -46,11 +46,21 @@ targets:
         NSMicrophoneUsageDescription: "Meeting records your microphone so your voice is included in transcripts."
         NSAudioCaptureUsageDescription: "Meeting captures audio from the meeting app you choose so participants' voices can be transcribed separately."
         NSDocumentsFolderUsageDescription: "Meeting saves recordings and transcripts to ~/Documents/Meetings/."
+        NSCalendarsFullAccessUsageDescription: "Meeting reads calendar events so it can pre-fill meeting titles, attendees, and remind you when a scheduled meeting is about to start. Calendar data stays on your Mac — it is never uploaded."
+        NSCalendarsUsageDescription: "Meeting reads calendar events to pre-fill meeting titles and attendees. Calendar data stays on your Mac."
     entitlements:
       path: Meeting/Resources/Meeting.entitlements
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.device.audio-input: true
+        # Hardened-runtime non-sandboxed apps on macOS 14+ have started
+        # needing this entitlement for EventKit's full-access API to
+        # actually trigger a TCC dialog. Without it the request is
+        # silently rejected: granted=false, status stays .notDetermined,
+        # and the app never appears in System Settings → Privacy →
+        # Calendars. The entitlement was originally a sandbox key but
+        # tccd consults it on hardened binaries too.
+        com.apple.security.personal-information.calendars: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.fluke.meeting

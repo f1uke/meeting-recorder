@@ -5,16 +5,12 @@ final class TranscriptMergerTests: XCTestCase {
     // MARK: - Fixtures
 
     private func micResult(
-        segments: [(start: Double, end: Double, text: String)] = [],
-        words: [(start: Double, end: Double, word: String)]? = nil
+        segments: [(start: Double, end: Double, text: String)] = []
     ) -> TranscriptResult {
         let segs = segments.map {
             TranscriptSegment(
                 start: $0.start, end: $0.end, speaker: .me, text: $0.text, source: .mic
             )
-        }
-        let wds = words?.map {
-            TranscriptWord(word: $0.word, start: $0.start, end: $0.end, speaker: .me)
         }
         let dur = segments.map(\.end).max() ?? 0
         return TranscriptResult(
@@ -22,8 +18,7 @@ final class TranscriptMergerTests: XCTestCase {
             model: "tiny",
             language: "th",
             duration: dur,
-            segments: segs,
-            words: wds
+            segments: segs
         )
     }
 
@@ -45,8 +40,7 @@ final class TranscriptMergerTests: XCTestCase {
             model: "tiny",
             language: "th",
             duration: dur,
-            segments: segs,
-            words: nil
+            segments: segs
         )
     }
 
@@ -104,37 +98,6 @@ final class TranscriptMergerTests: XCTestCase {
         let merged = TranscriptMerger.merge(mic: mic, output: out)
 
         XCTAssertEqual(merged.speakers.count, 2)
-    }
-
-    // MARK: - Words
-
-    func test_words_areMergedAndSorted() {
-        let mic = micResult(
-            segments: [(10.0, 12.0, "ฉันพูด")],
-            words: [(10.0, 11.0, "ฉัน"), (11.0, 12.0, "พูด")]
-        )
-        var out = outputResult(segments: [(5.0, 7.0, "เริ่ม", 0)])
-        out = TranscriptResult(
-            provider: out.provider,
-            model: out.model,
-            language: out.language,
-            duration: out.duration,
-            segments: out.segments,
-            words: [TranscriptWord(word: "เริ่ม", start: 5.0, end: 6.0,
-                                   speaker: .diarized(0))]
-        )
-
-        let merged = TranscriptMerger.merge(mic: mic, output: out)
-
-        XCTAssertEqual(merged.words?.map(\.word), ["เริ่ม", "ฉัน", "พูด"])
-        XCTAssertEqual(merged.words?.map(\.start), [5.0, 10.0, 11.0])
-    }
-
-    func test_words_areNilWhenNeitherProviderHasThem() {
-        let mic = micResult(segments: [(10.0, 12.0, "me")])
-        let out = outputResult(segments: [(5.0, 7.0, "them", 0)])
-        let merged = TranscriptMerger.merge(mic: mic, output: out)
-        XCTAssertNil(merged.words)
     }
 
     // MARK: - Misc

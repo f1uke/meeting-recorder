@@ -148,6 +148,7 @@ private struct PermissionRow: View {
         case .screenRecording: "rectangle.on.rectangle"
         case .microphone: "mic.fill"
         case .audioCapture: "speaker.wave.2.fill"
+        case .calendar: "calendar"
         }
     }
 

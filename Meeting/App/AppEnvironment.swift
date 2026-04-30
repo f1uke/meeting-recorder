@@ -14,6 +14,7 @@ struct AppEnvironment: ViewModifier {
             .environmentObject(state.transcribe)
             .environmentObject(state.library)
             .environmentObject(state.picker)
+            .environmentObject(state.calendar)
     }
 }
 

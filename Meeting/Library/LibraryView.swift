@@ -498,6 +498,9 @@ private struct LibraryDetail: View {
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 22) {
                             DetailHero(meeting: meeting)
+                            if meeting.calendarEvent != nil {
+                                CalendarDetailSection(meeting: meeting)
+                            }
                             AISummarySection(meeting: meeting)
                             ActionItemsSection(meeting: meeting)
                             if !meeting.speakers.isEmpty {
@@ -1061,5 +1064,221 @@ private struct ActionItemRow: View {
                 .fill(.regularMaterial)
         }
         .glassBorder(cornerRadius: 9)
+    }
+}
+
+// MARK: - Calendar section
+
+/// Detail-pane card surfacing the `CalendarEvent` captured at recording
+/// time: organizer, attendees with chips, location, and the conference URL
+/// (clickable). Hidden when the meeting has no calendar.json.
+private struct CalendarDetailSection: View {
+    let meeting: MeetingRecord
+
+    private var event: CalendarEvent? { meeting.calendarEvent }
+
+    var body: some View {
+        guard let event else { return AnyView(EmptyView()) }
+        return AnyView(
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    SectionLabel(text: "Calendar")
+                    Spacer()
+                    if let url = event.openInCalendarURL {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text("Open in Calendar")
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.brandAccent)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(event.title)
+                            .font(.serif(20))
+                            .foregroundStyle(Color.textPrimary)
+
+                        timeAndCalendarRow(event: event)
+
+                        if let location = event.location, !location.isEmpty {
+                            HStack(spacing: 6) {
+                                Image(systemName: "mappin.and.ellipse")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color.textDim)
+                                Text(location)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.textPrimary)
+                                    .lineLimit(2)
+                            }
+                        }
+
+                        if let conf = event.conferenceURL {
+                            Button {
+                                NSWorkspace.shared.open(conf)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "video.fill")
+                                        .font(.system(size: 11))
+                                    Text(conf.host ?? conf.absoluteString)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundStyle(Color.brandAccent)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if let organizer = event.organizer {
+                            attendeeRow(label: "Organizer", attendees: [organizer])
+                        }
+
+                        if !event.attendees.isEmpty {
+                            attendeeRow(
+                                label: "Attendees · \(event.attendees.count)",
+                                attendees: event.attendees
+                            )
+                        }
+                    }
+                    .padding(Tokens.cardPadding)
+                }
+            }
+        )
+    }
+
+    private func timeAndCalendarRow(event: CalendarEvent) -> some View {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        let timeText = "\(f.string(from: event.startDate)) – \(timeOnly(event.endDate))"
+        return HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "clock")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.textDim)
+                Text(timeText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.textPrimary)
+            }
+            if let cal = event.calendarName, !cal.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.textDim)
+                    Text(cal)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.textDim)
+                }
+            }
+        }
+    }
+
+    private func timeOnly(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        return f.string(from: date)
+    }
+
+    private func attendeeRow(label: String, attendees: [CalendarAttendee]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .kerning(0.6)
+                .foregroundStyle(Color.textDim)
+            FlowLayout(spacing: 6) {
+                ForEach(attendees) { attendee in
+                    AttendeeChip(attendee: attendee)
+                }
+            }
+        }
+    }
+}
+
+private struct AttendeeChip: View {
+    let attendee: CalendarAttendee
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Avatar(initials: initials, color: chipColor, size: 16)
+            Text(attendee.displayName)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.textPrimary)
+                .lineLimit(1)
+            if attendee.isMe {
+                Text("you")
+                    .font(.system(size: 9, weight: .bold))
+                    .kerning(0.4)
+                    .foregroundStyle(Color.brandAccent)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background {
+            Capsule().fill(.regularMaterial)
+        }
+    }
+
+    private var initials: String {
+        let parts = attendee.displayName
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .prefix(2)
+        let chars = parts.compactMap { $0.first }
+        return String(chars).uppercased()
+    }
+
+    private var chipColor: Color {
+        attendee.isMe ? Color.brandAccent : Color.textDim
+    }
+}
+
+/// Minimal flow layout for attendee chips. SwiftUI's built-in `Layout`
+/// machinery; wraps to next line when horizontal space runs out.
+private struct FlowLayout: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let arranged = arrange(subviews: subviews, in: width)
+        return arranged.size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let arranged = arrange(subviews: subviews, in: bounds.width)
+        for (subview, offset) in zip(subviews, arranged.offsets) {
+            subview.place(at: CGPoint(x: bounds.minX + offset.x, y: bounds.minY + offset.y),
+                          proposal: .unspecified)
+        }
+    }
+
+    private func arrange(subviews: Subviews, in width: CGFloat)
+        -> (offsets: [CGPoint], size: CGSize) {
+        var offsets: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var totalWidth: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > width && x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            offsets.append(CGPoint(x: x, y: y))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+            totalWidth = max(totalWidth, x - spacing)
+        }
+        return (offsets, CGSize(width: totalWidth, height: y + rowHeight))
     }
 }

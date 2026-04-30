@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UserNotifications
 
 /// Owns the menu bar status item and the popover panel.
 ///
@@ -17,7 +18,7 @@ import SwiftUI
 /// (`MenuBarLabel`, `MenuBarPopoverView`) are unchanged — we just host
 /// them inside `NSHostingView` / `NSHostingController`.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     /// Set by `MeetingApp.init` before `applicationDidFinishLaunching`
     /// runs so the delegate has the long-lived `AppState` to wire into
     /// the popover.
@@ -41,6 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Apply persisted user prefs that need NSApp to exist (e.g. the
         // appearance override). Safe here because NSApp is fully online.
         AppPreferences.shared.applyAppKitSideEffects()
+        // Become the notification-center delegate so we receive both the
+        // foreground-presentation hook (so banners show even when we're
+        // frontmost) and the user-tap hook for the calendar reminders
+        // scheduled by `CalendarNotifier`.
+        UNUserNotificationCenter.current().delegate = self
         if let state = AppDelegate.pendingState {
             attach(state: state)
             AppDelegate.pendingState = nil
@@ -185,6 +191,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // active before, and clicks inside the popover can be
             // discarded.
             popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    private func showPopover() {
+        guard let popover, let button = statusItem?.button else { return }
+        if popover.isShown { return }
+        popover.show(
+            relativeTo: button.bounds,
+            of: button,
+            preferredEdge: .minY
+        )
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
+    // MARK: - UNUserNotificationCenterDelegate
+
+    /// Show banners + play sound even when the app is currently active,
+    /// so the user actually sees the 5-min reminder regardless of focus.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    /// Handle taps on the calendar reminder: surface the popover so the
+    /// user can hit "Start Recording" with one click.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let kind = response.notification.request.content.userInfo["kind"] as? String
+        // The completion handler is not Sendable, so we can't capture it
+        // into a `Task @MainActor`. Call it synchronously here and let
+        // the UI hop happen on its own.
+        completionHandler()
+        guard kind == "meeting.upcoming" else { return }
+        Task { @MainActor in
+            NSApp.activate(ignoringOtherApps: true)
+            self.showPopover()
         }
     }
 }

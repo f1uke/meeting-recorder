@@ -21,6 +21,11 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var currentSourceTitle: String?
     /// Owning application name — paired with `currentSourceTitle`.
     @Published private(set) var currentSourceApp: String?
+    /// Calendar event the user attached to this recording (if any). Drives
+    /// the recording header's "Q2 Roadmap Sync · 4 attendees" line and is
+    /// persisted to `<folder>/calendar.json` on stop so the Library can
+    /// surface attendees + organizer + conference URL.
+    @Published private(set) var currentEvent: CalendarEvent?
     /// User-flagged moments accumulated by ⌘B during the active recording.
     /// Cleared on `start`, persisted to `marks.json` on `stop`.
     @Published private(set) var marks: [Mark] = []
@@ -47,7 +52,7 @@ final class RecordingSession: ObservableObject {
         return false
     }
 
-    func start(window: SCWindow) async {
+    func start(window: SCWindow, event: CalendarEvent? = nil) async {
         guard state == .idle else {
             NSLog("[Meeting/Session] start: bail — state is %@, expected .idle",
                   String(describing: state))
@@ -56,6 +61,7 @@ final class RecordingSession: ObservableObject {
         state = .starting
         errorMessage = nil
         marks = []
+        currentEvent = event
         micRMS.reset()
         outputRMS.reset()
 
@@ -202,6 +208,7 @@ final class RecordingSession: ObservableObject {
         currentFolder = nil
         currentSourceTitle = nil
         currentSourceApp = nil
+        currentEvent = nil
         micDeviceName = nil
         tapProcessCount = 0
         cancelStartWatchdog()
@@ -279,12 +286,26 @@ final class RecordingSession: ObservableObject {
                 NSLog("[Meeting/Session] marks.json write failed: %@",
                       String(describing: error))
             }
+
+            // Persist the attached calendar event (if any) so the Library
+            // can surface attendees / organizer / conference URL even
+            // after the app restarts. Failure is non-fatal — the event
+            // is just a metadata enrichment.
+            if let event = currentEvent {
+                do {
+                    try CalendarEventFile(event: event).write(to: folder)
+                } catch {
+                    NSLog("[Meeting/Session] calendar.json write failed: %@",
+                          String(describing: error))
+                }
+            }
         }
 
         lastFolder = currentFolder
         currentFolder = nil
         currentSourceTitle = nil
         currentSourceApp = nil
+        currentEvent = nil
         micDeviceName = nil
         tapProcessCount = 0
         state = .idle

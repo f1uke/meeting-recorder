@@ -27,7 +27,6 @@ final class TranscriptExporterTests: XCTestCase {
                     source: .meetingOutput
                 )
             ],
-            words: nil,
             speakers: [
                 Speaker(id: .me, displayName: "ฉัน"),
                 Speaker(id: .diarized(0), displayName: "Pim"),

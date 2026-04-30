@@ -416,17 +416,25 @@ private struct SpeakersPanel: View {
             }
 
             ForEach(transcript.speakers) { speaker in
-                SpeakerRow(
-                    speaker: speaker,
-                    speakingTime: speakingTime(for: speaker.id),
-                    isEditing: editingID == speaker.id,
-                    draftName: $draftName,
-                    onStartEdit: {
-                        editingID = speaker.id
-                        draftName = speaker.displayName
-                    },
-                    onCommit: { commit(id: speaker.id) }
-                )
+                VStack(alignment: .leading, spacing: 4) {
+                    SpeakerRow(
+                        speaker: speaker,
+                        speakingTime: speakingTime(for: speaker.id),
+                        isEditing: editingID == speaker.id,
+                        draftName: $draftName,
+                        onStartEdit: {
+                            editingID = speaker.id
+                            draftName = speaker.displayName
+                        },
+                        onCommit: { commit(id: speaker.id) }
+                    )
+                    if shouldSuggest(speaker: speaker) {
+                        AttendeeSuggestionRow(
+                            attendees: suggestableAttendees(),
+                            onPick: { name in apply(name: name, to: speaker.id) }
+                        )
+                    }
+                }
             }
         }
         .padding(12)
@@ -451,6 +459,90 @@ private struct SpeakersPanel: View {
             override.customSpeakerNames[id.rawValue] = trimmed
         }
         editingID = nil
+    }
+
+    private func apply(name: String, to id: SpeakerID) {
+        library.update(meeting: meeting.id) { override in
+            override.customSpeakerNames[id.rawValue] = name
+        }
+    }
+
+    /// Show suggestion chips only for raw "speaker_N" rows — once the
+    /// user (or this same flow) has named someone, we drop the chips so
+    /// the panel stays clean.
+    private func shouldSuggest(speaker: Speaker) -> Bool {
+        guard meeting.calendarEvent != nil else { return false }
+        let raw = speaker.id.rawValue
+        return speaker.displayName == raw || speaker.displayName.hasPrefix("speaker_")
+    }
+
+    /// Attendee names worth surfacing as chips: skip the user themselves
+    /// (they're already mapped to the dedicated "Me" speaker via the mic
+    /// stream) and skip anyone whose name has already been used as a
+    /// custom name on another speaker, so we don't suggest dupes.
+    private func suggestableAttendees() -> [CalendarAttendee] {
+        guard let event = meeting.calendarEvent else { return [] }
+        let already = Set(transcript.speakers.map { $0.displayName })
+        var pool: [CalendarAttendee] = []
+        if let organizer = event.organizer { pool.append(organizer) }
+        pool.append(contentsOf: event.attendees)
+        var seen = Set<String>()
+        return pool.filter { att in
+            guard !att.isMe else { return false }
+            guard seen.insert(att.id).inserted else { return false }
+            return !already.contains(att.displayName)
+        }
+        .prefix(6)
+        .map { $0 }
+    }
+}
+
+private struct AttendeeSuggestionRow: View {
+    let attendees: [CalendarAttendee]
+    let onPick: (String) -> Void
+
+    var body: some View {
+        if attendees.isEmpty {
+            EmptyView()
+        } else {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.brandAccent)
+                Text("From calendar:")
+                    .font(.system(size: 10, weight: .semibold))
+                    .kerning(0.4)
+                    .foregroundStyle(Color.textDim)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(attendees) { att in
+                            Button {
+                                onPick(att.displayName)
+                            } label: {
+                                Text(att.displayName)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Color.brandAccent)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background {
+                                        Capsule()
+                                            .fill(Color.brandAccent.opacity(0.10))
+                                            .overlay {
+                                                Capsule().strokeBorder(
+                                                    Color.brandAccent.opacity(0.30),
+                                                    lineWidth: 0.5
+                                                )
+                                            }
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .padding(.leading, 30)
+            .padding(.bottom, 2)
+        }
     }
 }
 

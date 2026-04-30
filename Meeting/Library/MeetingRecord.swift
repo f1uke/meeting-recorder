@@ -42,6 +42,12 @@ struct MeetingRecord: Identifiable, Equatable, Hashable, Sendable {
     /// Cached LLM summary, loaded from `summary.json` if present.
     let summary: Summary?
 
+    /// Calendar event captured at recording time, loaded from
+    /// `<folder>/calendar.json` if present. Drives the Library detail
+    /// "Calendar" section, the title fallback chain, and the Phase 2
+    /// speaker pre-fill suggestions.
+    let calendarEvent: CalendarEvent?
+
     var id: String { folder.lastPathComponent }
 }
 
