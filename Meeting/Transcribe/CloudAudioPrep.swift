@@ -2,6 +2,34 @@ import Foundation
 import Accelerate
 import WhisperKit
 
+/// Lock-protected per-chunk progress accumulator. Each chunk task owns one
+/// slot, writes monotonically increasing 0...1 fractions; the aggregator
+/// republishes the mean across all slots so the bar advances smoothly even
+/// when chunks complete out of dispatch order. Shared by every cloud
+/// provider that fans out chunk requests in parallel (Gemini, OpenAI).
+final class ChunkProgressAggregator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var perChunk: [Double]
+    private let report: (@Sendable (Double) -> Void)?
+
+    init(count: Int, report: (@Sendable (Double) -> Void)?) {
+        self.perChunk = Array(repeating: 0, count: max(count, 1))
+        self.report = report
+    }
+
+    func update(index: Int, fraction: Double) {
+        let total: Double
+        lock.lock()
+        let clamped = max(0, min(1, fraction))
+        if index < perChunk.count, clamped > perChunk[index] {
+            perChunk[index] = clamped
+        }
+        total = perChunk.reduce(0, +) / Double(perChunk.count)
+        lock.unlock()
+        report?(total)
+    }
+}
+
 /// Shared decoding + preprocessing + chunking for cloud transcription
 /// providers (Gemini, OpenAI). Centralized so both providers see byte-
 /// identical audio after AEC / normalize / mute-gate, and so the

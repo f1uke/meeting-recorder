@@ -29,6 +29,11 @@ actor OpenAIProvider: TranscriptionProvider {
     private let modelName: String
     private let responseFormat: String
     private let chunkDuration: TimeInterval
+    /// True when the model returns speaker-labeled segments natively
+    /// (currently only `gpt-4o-transcribe-diarize`). When set, we skip
+    /// the local SpeakerKit pass + IoU merger and consume the speaker
+    /// field on each `diarized_json` segment directly.
+    private let supportsNativeDiarization: Bool
 
     private let urlSession: URLSession
 
@@ -40,19 +45,24 @@ actor OpenAIProvider: TranscriptionProvider {
         glossary: String,
         modelName: String = "gpt-4o-transcribe",
         responseFormat: String = "json",
-        chunkDuration: TimeInterval = 90
+        chunkDuration: TimeInterval = 60,
+        supportsNativeDiarization: Bool = false
     ) {
         self.apiKey = apiKey
         self.glossary = glossary
         self.modelName = modelName
         self.responseFormat = responseFormat
         self.chunkDuration = chunkDuration
-        self.name = "OpenAI (\(modelName)) + SpeakerKit"
+        self.supportsNativeDiarization = supportsNativeDiarization
+        self.name = supportsNativeDiarization
+            ? "OpenAI (\(modelName))"
+            : "OpenAI (\(modelName)) + SpeakerKit"
 
         let config = URLSessionConfiguration.default
-        // OpenAI's transcription endpoint can take 30-90s per 6-min chunk.
-        // 600s per request gives plenty of headroom for slow models / small
-        // files retrying.
+        // /v1/audio/transcriptions can take a few seconds per 60 s chunk
+        // on healthy days, longer when the model is overloaded. 600 s per
+        // request leaves comfortable retry headroom even when something
+        // upstream stalls.
         config.timeoutIntervalForRequest = 600
         config.timeoutIntervalForResource = 1800
         self.urlSession = URLSession(configuration: config)
@@ -79,9 +89,9 @@ actor OpenAIProvider: TranscriptionProvider {
         let generateEnd = options.withDiarization ? 0.70 : 1.0
         progress?(0)
 
-        // Chunk via shared helper. Same 6-min strategy as Gemini, plus the
-        // 25 MB request-size limit on /v1/audio/transcriptions makes
-        // chunking mandatory anyway (1 hr m4a ≈ 28 MB).
+        // Chunk via shared helper. Voiced-aware on the mic stream; fixed
+        // 60s chunks elsewhere. /v1/audio/transcriptions caps single
+        // requests at 25 MB, which 60 s of 16k mono PCM stays well under.
         let chunks = try CloudAudioPrep.prepareChunks(
             audioURL: audioURL,
             options: options,
@@ -96,27 +106,87 @@ actor OpenAIProvider: TranscriptionProvider {
             }
         }
 
-        var allCloudSegments: [CloudSegment] = []
-        for (idx, chunk) in chunks.enumerated() {
-            let chunkStart = generateEnd * Double(idx) / Double(chunks.count)
-            let chunkBand = generateEnd / Double(chunks.count)
-            let chunkProgress: @Sendable (Double) -> Void = { fraction in
-                progress?(chunkStart + max(0, min(1, fraction)) * chunkBand)
-            }
-            let segs = try await transcribeOneChunk(
-                audioURL: chunk.url,
-                offset: chunk.offset,
-                language: options.language,
-                onProgress: chunkProgress
-            )
-            allCloudSegments.append(contentsOf: segs)
+        // Process chunks in parallel — each chunk = 1 multipart POST and
+        // the URLSession is built for concurrent requests. 4 in flight
+        // matches Gemini's setup and stays well under OpenAI's per-key
+        // RPM limits on paid tiers.
+        let maxConcurrent = 4
+        let aggregator = ChunkProgressAggregator(count: chunks.count) { fraction in
+            progress?(fraction * generateEnd)
         }
+        let collected = try await withThrowingTaskGroup(of: (Int, [CloudSegment]).self) { group in
+            var dispatched = 0
+            while dispatched < min(maxConcurrent, chunks.count) {
+                let idx = dispatched
+                let chunk = chunks[idx]
+                let language = options.language
+                group.addTask { [self] in
+                    let segs = try await transcribeOneChunk(
+                        audioURL: chunk.url,
+                        offset: chunk.offset,
+                        language: language,
+                        onProgress: { fraction in
+                            aggregator.update(index: idx, fraction: fraction)
+                        }
+                    )
+                    return (idx, segs)
+                }
+                dispatched += 1
+            }
+            var results: [(Int, [CloudSegment])] = []
+            results.reserveCapacity(chunks.count)
+            while let result = try await group.next() {
+                results.append(result)
+                if dispatched < chunks.count {
+                    let idx = dispatched
+                    let chunk = chunks[idx]
+                    let language = options.language
+                    group.addTask { [self] in
+                        let segs = try await transcribeOneChunk(
+                            audioURL: chunk.url,
+                            offset: chunk.offset,
+                            language: language,
+                            onProgress: { fraction in
+                                aggregator.update(index: idx, fraction: fraction)
+                            }
+                        )
+                        return (idx, segs)
+                    }
+                    dispatched += 1
+                }
+            }
+            return results
+        }
+        let allCloudSegments = collected
+            .sorted { $0.0 < $1.0 }
+            .flatMap { $0.1 }
         progress?(generateEnd)
 
         let totalDuration = allCloudSegments.last.map { TimeInterval($0.end) } ?? 0
         let language = allCloudSegments.first?.language ?? options.language
 
         if options.withDiarization {
+            // Native-diarization path: response already carries speaker
+            // labels per segment, so skip SpeakerKit + IoU merging
+            // entirely. Map "A"/"B"/… to a stable speaker_N index in
+            // first-seen order — within a single API call the labels
+            // are consistent, which is the typical case (a 12-min
+            // meeting fits in one 1200 s chunk). Cross-chunk identity
+            // continuity is a Phase-2 feature using known_speaker_refs.
+            if supportsNativeDiarization {
+                let segments = mapNativelyDiarizedSegments(
+                    allCloudSegments,
+                    source: options.source
+                )
+                progress?(1.0)
+                return TranscriptResult(
+                    provider: name,
+                    model: modelName,
+                    language: language,
+                    duration: totalDuration,
+                    segments: segments
+                )
+            }
             let timeline = try await runDiarization(
                 audioURL: audioURL,
                 expectedSpeakerCount: options.expectedSpeakerCount
@@ -173,9 +243,57 @@ actor OpenAIProvider: TranscriptionProvider {
         let end: TimeInterval
         let text: String
         let language: String?
+        /// Set only when the response was `diarized_json` — carries the
+        /// model's "A"/"B"/… speaker tag so the native-diarization path
+        /// can map straight to `SpeakerID.diarized(N)` without a local
+        /// SpeakerKit run.
+        let speakerLabel: String?
     }
 
-    private func transcribeOneChunk(
+    /// Build TranscriptSegments from the diarize-model's already-labeled
+    /// segments. Maps the model's letter labels (A, B, C…) to
+    /// `speaker_0`, `speaker_1`, … in first-seen order so the rest of
+    /// the app — which keys speaker rename / library overrides off the
+    /// diarized index — sees the same shape it does from SpeakerKit.
+    private func mapNativelyDiarizedSegments(
+        _ segments: [CloudSegment],
+        source: AudioSource
+    ) -> [TranscriptSegment] {
+        var labelIndex: [String: Int] = [:]
+        var out: [TranscriptSegment] = []
+        out.reserveCapacity(segments.count)
+        for seg in segments {
+            let trimmed = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let dur = seg.end - seg.start
+            if HallucinationFilter.isHallucination(text: trimmed, durationSeconds: dur) {
+                continue
+            }
+            let speaker: SpeakerID = {
+                guard let raw = seg.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !raw.isEmpty else {
+                    return SpeakerID(rawValue: "unknown")
+                }
+                if let idx = labelIndex[raw] {
+                    return SpeakerID.diarized(idx)
+                }
+                let idx = labelIndex.count
+                labelIndex[raw] = idx
+                return SpeakerID.diarized(idx)
+            }()
+            out.append(TranscriptSegment(
+                start: seg.start,
+                end: seg.end,
+                speaker: speaker,
+                text: trimmed,
+                source: source
+            ))
+        }
+        out.sort { $0.start < $1.start }
+        return out
+    }
+
+    private nonisolated func transcribeOneChunk(
         audioURL: URL,
         offset: TimeInterval,
         language: String?,
@@ -208,7 +326,8 @@ actor OpenAIProvider: TranscriptionProvider {
                 start: seg.start + offset,
                 end: seg.end + offset,
                 text: seg.text,
-                language: seg.language
+                language: seg.language,
+                speakerLabel: seg.speakerLabel
             )
         }
     }
@@ -239,7 +358,7 @@ actor OpenAIProvider: TranscriptionProvider {
     /// has nothing else to "transcribe", so it echoes the prompt). Wrap
     /// it in a sentence so an echo would at least look unnatural and the
     /// downstream filter can catch it.
-    private func formatPrompt() -> String {
+    private nonisolated func formatPrompt() -> String {
         guard !glossary.isEmpty else { return "" }
         if modelName.hasPrefix("gpt-4o") {
             return "This is a software development meeting recorded in Thai with frequent English technical terms. Topics may include: \(glossary)."
@@ -278,7 +397,7 @@ actor OpenAIProvider: TranscriptionProvider {
 
     // MARK: - Multipart upload + parse
 
-    private func postTranscription(
+    private nonisolated func postTranscription(
         audioURL: URL,
         language: String?,
         chunkDuration: TimeInterval,
@@ -310,10 +429,22 @@ actor OpenAIProvider: TranscriptionProvider {
 
         addField("model", modelName)
         addField("response_format", responseFormat)
-        addField("temperature", "0")
-        if let language { addField("language", language) }
-        let promptText = formatPrompt()
-        if !promptText.isEmpty { addField("prompt", promptText) }
+
+        if responseFormat == "diarized_json" {
+            // gpt-4o-transcribe-diarize is finicky about extra fields:
+            // sending `language`, `temperature`, or `prompt` reliably
+            // returns HTTP 500 with a generic "server_error" instead of
+            // a structured 4xx (poor input validation on their side).
+            // The minimal-fields shape — model + file + response_format
+            // + chunking_strategy — matches the Python SDK example and
+            // is the only combination community reports confirm working.
+            addField("chunking_strategy", "auto")
+        } else {
+            addField("temperature", "0")
+            if let language { addField("language", language) }
+            let promptText = formatPrompt()
+            if !promptText.isEmpty { addField("prompt", promptText) }
+        }
 
         // File part — the chunk WAV from CloudAudioPrep.
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
@@ -337,24 +468,37 @@ actor OpenAIProvider: TranscriptionProvider {
         }
         guard http.statusCode == 200 else {
             let summary = Self.explainOpenAIError(status: http.statusCode, body: data)
+            // Dump the full body to Console — `summary` is truncated for
+            // the user-facing error and the structured envelope skips
+            // fields like `param`/`code` that are often the only clue
+            // for diarize-model 500s.
+            NSLog("[Meeting/Transcribe] OpenAI %d full body:\n%@",
+                  http.statusCode,
+                  String(data: data, encoding: .utf8) ?? "<non-utf8>")
             throw TranscriptionError.providerFailed(name, underlying: OpenAIError.requestFailed(summary))
         }
 
-        // Try verbose_json first (whisper-1 supports it). Fall back to
-        // plain-text {text:...} for models that ignored response_format.
-        struct Verbose: Decodable {
+        // Two response shapes share the same envelope at this layer:
+        //   - whisper-1 (verbose_json): {language, segments[{start,end,text}], text}
+        //   - gpt-4o-* (json):          {text}
+        //   - gpt-4o-transcribe-diarize (diarized_json):
+        //         {language, full_text, segments[{start,end,text,speaker, ...}]}
+        // One decoder with optional fields covers all three.
+        struct Wire: Decodable {
             struct Seg: Decodable {
                 let start: Double
                 let end: Double
                 let text: String
+                let speaker: String?
             }
             let language: String?
             let segments: [Seg]?
             let text: String?
+            let full_text: String?
         }
-        let parsed: Verbose
+        let parsed: Wire
         do {
-            parsed = try JSONDecoder().decode(Verbose.self, from: data)
+            parsed = try JSONDecoder().decode(Wire.self, from: data)
         } catch {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw TranscriptionError.providerFailed(name, underlying: OpenAIError.requestFailed(
@@ -364,7 +508,13 @@ actor OpenAIProvider: TranscriptionProvider {
 
         if let segments = parsed.segments, !segments.isEmpty {
             return segments.map {
-                CloudSegment(start: $0.start, end: $0.end, text: $0.text, language: parsed.language)
+                CloudSegment(
+                    start: $0.start,
+                    end: $0.end,
+                    text: $0.text,
+                    language: parsed.language,
+                    speakerLabel: $0.speaker
+                )
             }
         }
 
@@ -373,19 +523,26 @@ actor OpenAIProvider: TranscriptionProvider {
         // chunk-bound segment so the rest of the pipeline gets the text;
         // diarization will only be able to assign a single speaker per
         // chunk, but that's better than dropping the audio.
-        guard let text = parsed.text, !text.isEmpty else {
+        let fallbackText = parsed.text ?? parsed.full_text ?? ""
+        guard !fallbackText.isEmpty else {
             throw TranscriptionError.providerFailed(name, underlying: OpenAIError.requestFailed(
                 "Empty response (no segments, no text)"
             ))
         }
         NSLog("[Meeting/Transcribe] OpenAI %@ returned plain text (no segments) — falling back to chunk-bound segment",
               modelName)
-        return [CloudSegment(start: 0, end: chunkDuration, text: text, language: parsed.language)]
+        return [CloudSegment(
+            start: 0,
+            end: chunkDuration,
+            text: fallbackText,
+            language: parsed.language,
+            speakerLabel: nil
+        )]
     }
 
     // MARK: - Retry + error parsing
 
-    private func sendWithRetry(
+    private nonisolated func sendWithRetry(
         label: String,
         maxAttempts: Int = 3,
         _ send: () async throws -> (Data, URLResponse)
@@ -419,18 +576,18 @@ actor OpenAIProvider: TranscriptionProvider {
         }
     }
 
-    private func shouldRetryStatus(_ code: Int) -> Bool {
+    private nonisolated func shouldRetryStatus(_ code: Int) -> Bool {
         // OpenAI 429 is usually RPM throttling, not daily quota — short
         // backoff often clears it. So unlike Gemini, we DO retry 429.
         code == 429 || (500...599).contains(code)
     }
 
-    private func retryDelay(attempt: Int) -> Double {
+    private nonisolated func retryDelay(attempt: Int) -> Double {
         // 3s, 9s, 27s. OpenAI throttle windows are usually <1 min.
         3.0 * pow(3.0, Double(attempt - 1))
     }
 
-    private func isRetryableNetworkError(_ error: Error) -> Bool {
+    private nonisolated func isRetryableNetworkError(_ error: Error) -> Bool {
         guard let urlError = error as? URLError else { return false }
         switch urlError.code {
         case .timedOut, .networkConnectionLost, .cannotConnectToHost,

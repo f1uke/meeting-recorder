@@ -89,7 +89,8 @@ final class AppState: ObservableObject {
                 glossary: prefs.transcriptionGlossary,
                 modelName: prefs.openaiModel.rawValue,
                 responseFormat: prefs.openaiModel.apiResponseFormat,
-                chunkDuration: prefs.openaiModel.chunkDuration
+                chunkDuration: prefs.openaiModel.chunkDuration,
+                supportsNativeDiarization: prefs.openaiModel.supportsNativeDiarization
             )
         }
     }

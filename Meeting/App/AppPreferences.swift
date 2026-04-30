@@ -410,29 +410,32 @@ enum GeminiModel: String, CaseIterable, Identifiable, Sendable {
 // MARK: - OpenAI model
 
 /// Selectable OpenAI transcription model. Raw values are the API model
-/// IDs. `gpt-4o-transcribe-diarize` is intentionally omitted — its
-/// response shape and diarization output haven't been wired in yet.
+/// IDs.
 enum OpenAIModel: String, CaseIterable, Identifiable, Sendable {
-    case gpt4oTranscribe     = "gpt-4o-transcribe"
-    case gpt4oMiniTranscribe = "gpt-4o-mini-transcribe"
-    case whisper1            = "whisper-1"
+    case gpt4oTranscribe        = "gpt-4o-transcribe"
+    case gpt4oMiniTranscribe    = "gpt-4o-mini-transcribe"
+    case gpt4oTranscribeDiarize = "gpt-4o-transcribe-diarize"
+    case whisper1               = "whisper-1"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .gpt4oTranscribe:     "gpt-4o-transcribe"
-        case .gpt4oMiniTranscribe: "gpt-4o-mini-transcribe"
-        case .whisper1:            "whisper-1"
+        case .gpt4oTranscribe:        "gpt-4o-transcribe"
+        case .gpt4oMiniTranscribe:    "gpt-4o-mini-transcribe"
+        case .gpt4oTranscribeDiarize: "gpt-4o-transcribe-diarize"
+        case .whisper1:               "whisper-1"
         }
     }
 
     var description: String {
         switch self {
         case .gpt4oTranscribe:
-            "Newest, highest-quality OpenAI transcription model. Best for Thai-English code-switching. Returns text-only (no per-segment timestamps), so each chunk = one segment — chunked at 90s to keep diarization granularity reasonable."
+            "Newest, highest-quality OpenAI transcription model. Best for Thai-English code-switching. Returns text-only (no per-segment timestamps), so each 60s chunk = one segment."
         case .gpt4oMiniTranscribe:
-            "Cheaper, smaller variant of gpt-4o-transcribe. Same text-only output / 90s-chunk constraint."
+            "Cheaper, smaller variant of gpt-4o-transcribe. Same text-only output."
+        case .gpt4oTranscribeDiarize:
+            "Native speaker diarization built into the model — returns segments with speaker labels in one call, skips local SpeakerKit. Up to 12.5 min per chunk (capped by the 25 MB request limit). Trade-off: no prompt/glossary support, so technical terms may transcribe less accurately than gpt-4o-transcribe; meetings >12 min get multiple chunks and speaker labels reset per chunk."
         case .whisper1:
             "Original Whisper API. Same architecture as the on-device model but hosted. Returns proper per-segment timestamps via verbose_json — best timestamp accuracy of the three."
         }
@@ -440,24 +443,38 @@ enum OpenAIModel: String, CaseIterable, Identifiable, Sendable {
 
     /// API response format the model can actually honor. Only whisper-1
     /// returns segments via `verbose_json`; the gpt-4o-* models reject
-    /// it (HTTP 400 invalid_request_error) and require `json` or `text`.
+    /// it. `gpt-4o-transcribe-diarize` requires the new `diarized_json`
+    /// shape that ships speaker labels alongside segment timestamps.
     var apiResponseFormat: String {
         switch self {
-        case .whisper1: "verbose_json"
-        case .gpt4oTranscribe, .gpt4oMiniTranscribe: "json"
+        case .whisper1:                                     "verbose_json"
+        case .gpt4oTranscribe, .gpt4oMiniTranscribe:        "json"
+        case .gpt4oTranscribeDiarize:                       "diarized_json"
         }
     }
 
-    /// Chunk size to use when slicing audio for this model. Whisper
-    /// returns fine-grained segments so 6 min chunks are fine. gpt-4o-*
-    /// returns text-only — every chunk becomes one segment, so we cap at
-    /// 90s to keep diarization-by-IoU usable (each chunk maps to one
-    /// dominant speaker, and 90s chunks rarely span >2 speaker turns).
+    /// Chunk size in seconds. 60 s for every text-only model — matches
+    /// Gemini so the two engines can be A/B compared on the same audio
+    /// boundary, and keeps every request inside each model's
+    /// tight-attention window. The diarize model accepts up to 1400 s
+    /// per request, but /v1/audio/transcriptions caps file size at 25 MB
+    /// and our chunks are 16 kHz mono 16-bit PCM = 32 KB/s. Hard ceiling
+    /// is 819 s (= 25 MB exactly); 750 s leaves ~1.5 MB headroom and
+    /// still fits any typical daily standup (10-12 min) in one chunk so
+    /// speaker labels stay consistent end to end.
     var chunkDuration: TimeInterval {
         switch self {
-        case .whisper1: 360
-        case .gpt4oTranscribe, .gpt4oMiniTranscribe: 90
+        case .gpt4oTranscribeDiarize: 750
+        default: 60
         }
+    }
+
+    /// True when the model returns speaker-labeled segments natively.
+    /// `OpenAIProvider` skips its local SpeakerKit + DiarizationMerger
+    /// pipeline for these models and consumes the speaker field on each
+    /// `diarized_json` segment directly.
+    var supportsNativeDiarization: Bool {
+        self == .gpt4oTranscribeDiarize
     }
 }
 
