@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreAudio
 
 // Intentionally NOT @MainActor: AVAudioEngine calls the install-tap block on
 // its render thread. With @MainActor isolation, the inherited closure would
@@ -14,14 +15,52 @@ final class MicRecorder: @unchecked Sendable {
 
     /// Push level samples into the caller-provided ring buffer so the UI
     /// can render a live waveform without owning the recorder.
-    func start(url: URL, rmsBuffer: RMSRingBuffer? = nil) throws {
+    ///
+    /// `deviceUID` pins the engine to a specific audio device (matched by
+    /// its stable `kAudioDevicePropertyDeviceUID`). `nil` falls back to the
+    /// system default — same behavior we shipped before Settings landed.
+    func start(url: URL, deviceUID: String? = nil, rmsBuffer: RMSRingBuffer? = nil) throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
+
+        // Pin a specific input device when the user has chosen one in
+        // Settings → Recording. Must happen BEFORE the input format is
+        // queried and BEFORE the tap is installed — switching the device
+        // resets the audio unit's negotiated format. Failure to pin is
+        // surfaced via deviceName below; we don't throw because falling
+        // back to the system default is preferable to refusing to record.
+        let resolvedDevice: AudioObjectID? = {
+            guard let uid = deviceUID, !uid.isEmpty else { return nil }
+            guard let device = AudioInputDevices.find(uid: uid) else { return nil }
+            if let unit = input.audioUnit {
+                var deviceID = device.id
+                let status = AudioUnitSetProperty(
+                    unit,
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    &deviceID,
+                    UInt32(MemoryLayout<AudioObjectID>.size)
+                )
+                if status != noErr {
+                    NSLog("[Meeting/Mic] failed to pin device %@ (status=%d) — using system default",
+                          uid, status)
+                    return nil
+                }
+            }
+            return device.id
+        }()
+
         let inputFormat = input.outputFormat(forBus: 0)
 
-        // Resolve the active input device's display name. AVCaptureDevice
-        // gives us the user-friendly label without poking at HAL directly.
-        self.deviceName = AVCaptureDevice.default(for: .audio)?.localizedName
+        // Resolve the device's display name for UI sublabels. Prefer the
+        // pinned-device's name when we set one; otherwise ask AVCapture.
+        if let pinnedID = resolvedDevice,
+           let device = AudioInputDevices.enumerate().first(where: { $0.id == pinnedID }) {
+            self.deviceName = device.name
+        } else {
+            self.deviceName = AVCaptureDevice.default(for: .audio)?.localizedName
+        }
 
         let fileSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,

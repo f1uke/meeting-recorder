@@ -51,10 +51,18 @@ final class TranscriptionSession: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var lastResult: MergedTranscript?
 
-    private let provider: TranscriptionProvider
+    private var provider: TranscriptionProvider
 
     init(provider: TranscriptionProvider) {
         self.provider = provider
+    }
+
+    /// Hot-swap the provider when the user changes Whisper model variant.
+    /// Caller must check `state` is not `.running`; we additionally guard
+    /// here so a race with an in-flight run is at worst a no-op.
+    func replaceProvider(_ new: TranscriptionProvider) {
+        if case .running = state { return }
+        self.provider = new
     }
 
     /// Reset back to idle so the UI returns to the picker. Doesn't cancel a
@@ -84,12 +92,18 @@ final class TranscriptionSession: ObservableObject {
             Task.detached { await provider.unloadModels() }
         }
 
+        // Honor the user's language pref from Settings → General. `.auto`
+        // → `nil` so Whisper detects per chunk; an explicit choice forces
+        // Whisper into that language and avoids the Thai-as-English
+        // misclassification problem on the turbo variant.
+        let languageCode = AppPreferences.shared.transcriptionLanguage.whisperCode
+
         do {
             enter(stage: .transcribingMic, fraction: 0)
             let mic = try await provider.transcribe(
                 audioURL: micURL,
                 options: TranscriptionOptions(
-                    language: "th",
+                    language: languageCode,
                     withDiarization: false,
                     knownSpeaker: .me,
                     source: .mic
@@ -98,14 +112,10 @@ final class TranscriptionSession: ObservableObject {
             )
 
             enter(stage: .transcribingOutput, fraction: 0)
-            // Bias toward Thai for the meeting-output stream. Whisper handles
-            // Thai-English code-switching well when language is set to "th";
-            // leaving it on auto-detect has been observed to fall through to
-            // English and butcher Thai content into translated phrasing.
             let output = try await provider.transcribe(
                 audioURL: outputURL,
                 options: TranscriptionOptions(
-                    language: "th",
+                    language: languageCode,
                     withDiarization: true,
                     knownSpeaker: nil,
                     source: .meetingOutput,

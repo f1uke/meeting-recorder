@@ -116,8 +116,12 @@ final class RecordingSession: ObservableObject {
         do {
             let micURLLocal = micURL
             let micRMSLocal = micRMS
+            // Snapshot the user's pinned device on the main actor before
+            // hopping off — keeps actor isolation clean and means the
+            // value used during start matches whatever Settings showed.
+            let pinnedUID = AppPreferences.shared.micDeviceUID
             try await Task.detached(priority: .userInitiated) {
-                try mic.start(url: micURLLocal, rmsBuffer: micRMSLocal)
+                try mic.start(url: micURLLocal, deviceUID: pinnedUID, rmsBuffer: micRMSLocal)
             }.value
             guard state == .starting else {
                 mic.stop()

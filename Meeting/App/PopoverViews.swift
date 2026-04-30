@@ -20,9 +20,14 @@ struct PopoverIdleView: View {
                 title: "Meeting",
                 subtitle: "Ready to record",
                 trailing: {
-                    GlassIconButton(systemImage: "books.vertical", size: 26) {
-                        appState.route = .library
-                        openWindow(id: "main")
+                    HStack(spacing: 6) {
+                        GlassIconButton(systemImage: "gearshape", size: 26) {
+                            openWindow(id: "settings")
+                        }
+                        GlassIconButton(systemImage: "books.vertical", size: 26) {
+                            appState.route = .library
+                            openWindow(id: "main")
+                        }
                     }
                 }
             )

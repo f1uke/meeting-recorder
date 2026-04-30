@@ -10,6 +10,7 @@ import SwiftUI
 struct MenuBarLabel: View {
     @ObservedObject var recording: RecordingSession
     @ObservedObject var transcribe: TranscriptionSession
+    @ObservedObject private var prefs = AppPreferences.shared
 
     var body: some View {
         switch (recording.state, transcribe.state) {
@@ -18,10 +19,12 @@ struct MenuBarLabel: View {
                 Circle()
                     .fill(Color.red)
                     .frame(width: 7, height: 7)
-                // Built-in self-updating timer — no per-second tick needed.
-                Text(started, style: .timer)
-                    .monospacedDigit()
-                    .font(.system(size: 11, weight: .medium))
+                if prefs.showMenuBarTimer {
+                    // Built-in self-updating timer — no per-second tick needed.
+                    Text(started, style: .timer)
+                        .monospacedDigit()
+                        .font(.system(size: 11, weight: .medium))
+                }
             }
 
         case (_, .running):

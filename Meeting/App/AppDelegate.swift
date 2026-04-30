@@ -31,6 +31,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window is closed. The status item is the persistent surface.
         NSApp.setActivationPolicy(.accessory)
         setUpStatusItem()
+        // Apply persisted user prefs that need NSApp to exist (e.g. the
+        // appearance override). Safe here because NSApp is fully online.
+        AppPreferences.shared.applyAppKitSideEffects()
         if let state = AppDelegate.pendingState {
             attach(state: state)
             AppDelegate.pendingState = nil

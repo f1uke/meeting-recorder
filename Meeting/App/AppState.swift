@@ -31,7 +31,8 @@ final class AppState: ObservableObject {
 
     init() {
         self.recording = RecordingSession()
-        self.transcribe = TranscriptionSession(provider: LocalProvider())
+        let variant = AppPreferences.shared.modelVariant.rawValue
+        self.transcribe = TranscriptionSession(provider: LocalProvider(modelVariant: variant))
         self.library = MeetingsLibrary()
         self.toast = ToastPresenter()
         self.llm = ClaudeCLIProvider()
@@ -41,6 +42,16 @@ final class AppState: ObservableObject {
             guard let self else { return }
             self.llmAvailability = await self.llm.availability()
         }
+    }
+
+    /// Replace the underlying transcription provider — called when the
+    /// user picks a different Whisper model in Settings. Cheap to do
+    /// (model load is lazy on first transcribe), but no-ops mid-run so
+    /// we don't yank a provider out from under an in-flight job.
+    func applyModelVariantChange() {
+        if case .running = transcribe.state { return }
+        let variant = AppPreferences.shared.modelVariant.rawValue
+        transcribe.replaceProvider(LocalProvider(modelVariant: variant))
     }
 
     func refreshPermissions() async {

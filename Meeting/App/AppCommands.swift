@@ -11,8 +11,19 @@ import SwiftUI
 struct AppCommands: Commands {
     @ObservedObject var recording: RecordingSession
     let stopAndTranscribe: () -> Void
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        // Replace SwiftUI's auto-generated "Settings…" with one that opens
+        // our window scene. Required because we're using a regular Window
+        // (not the `Settings` scene) so SwiftUI doesn't wire ⌘, by itself.
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                openWindow(id: "settings")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+
         CommandMenu("Recording") {
             Button("Mark Moment") {
                 recording.mark()

@@ -32,5 +32,12 @@ struct MeetingApp: App {
                 Task { await appState.stopAndTranscribe() }
             }
         }
+
+        // Standalone Settings window. ⌘, in `AppCommands` opens it.
+        Window("Settings", id: "settings") {
+            SettingsView()
+                .appEnvironment(appState)
+        }
+        .windowResizability(.contentMinSize)
     }
 }
