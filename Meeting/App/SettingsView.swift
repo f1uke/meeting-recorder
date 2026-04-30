@@ -31,11 +31,7 @@ struct SettingsView: View {
                         subtitle: "Tweak Whisper chunking, hallucination filters, and post-processing.",
                         icon: "waveform"
                     )
-                    case .calendar:      ComingSoonTab(
-                        title: "Calendar",
-                        subtitle: "Auto-record from macOS Calendar events.",
-                        icon: "calendar"
-                    )
+                    case .calendar:      CalendarTab()
                     case .aiPrivacy:     ComingSoonTab(
                         title: "AI & Privacy",
                         subtitle: "Manage Claude CLI integration and on-device data flow.",
@@ -494,6 +490,168 @@ private struct ModelPickerRow: View {
         .padding(.vertical, 12)
     }
 }
+
+// =============================================================================
+// MARK: - Calendar tab
+// =============================================================================
+
+private struct CalendarTab: View {
+    @ObservedObject private var prefs = AppPreferences.shared
+    @EnvironmentObject private var calendar: CalendarStore
+    @State private var draftEmail: String = ""
+    @State private var draftError: String?
+
+    private var sortedEmails: [String] {
+        prefs.myEmails.sorted()
+    }
+
+    private var unaddedSuggestions: [String] {
+        let current = prefs.myEmails
+        return calendar.suggestedMyEmails().filter { !current.contains($0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            DetailHeader(
+                title: "Calendar",
+                subtitle: "Tell Meeting which email addresses are yours so it can map you to the right speaker."
+            )
+
+            SettingsSection(label: "My email addresses") {
+                VStack(alignment: .leading, spacing: 0) {
+                    if sortedEmails.isEmpty {
+                        Text("No emails added yet.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.textDim)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                    } else {
+                        ForEach(Array(sortedEmails.enumerated()), id: \.element) { index, email in
+                            HStack(spacing: 8) {
+                                Image(systemName: "envelope")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.textDim)
+                                Text(email)
+                                    .font(.mono(12))
+                                    .foregroundStyle(Color.textPrimary)
+                                    .textSelection(.enabled)
+                                Spacer()
+                                Button(action: { remove(email) }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(Color.textFaint)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove")
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            if index < sortedEmails.count - 1 {
+                                Divider().opacity(0.3)
+                            }
+                        }
+                    }
+
+                    Divider().opacity(0.4)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.textDim)
+                        TextField("name@example.com", text: $draftEmail, onCommit: addDraft)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                        Button("Add", action: addDraft)
+                            .controlSize(.small)
+                            .disabled(draftEmail.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+
+                    if let err = draftError {
+                        Divider().opacity(0.4)
+                        InlineNote(text: err, tone: .warning)
+                    }
+                }
+            }
+
+            if !unaddedSuggestions.isEmpty {
+                SettingsSection(label: "Suggested from your calendars") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Detected from your connected calendar accounts. Click to add.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.textDim)
+                        FlowChips(items: unaddedSuggestions, onPick: add)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                }
+            }
+        }
+    }
+
+    private func addDraft() {
+        let email = draftEmail.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !email.isEmpty else { return }
+        guard email.contains("@"), email.contains(".") else {
+            draftError = "“\(draftEmail)” doesn't look like an email address."
+            return
+        }
+        add(email)
+        draftEmail = ""
+        draftError = nil
+    }
+
+    private func add(_ email: String) {
+        var updated = prefs.myEmails
+        updated.insert(email.lowercased())
+        prefs.myEmails = updated
+    }
+
+    private func remove(_ email: String) {
+        var updated = prefs.myEmails
+        updated.remove(email)
+        prefs.myEmails = updated
+    }
+}
+
+/// Wrapping row of capsule chips. Each chip is a button; new lines wrap
+/// automatically when the row runs out of horizontal room.
+private struct FlowChips: View {
+    let items: [String]
+    let onPick: (String) -> Void
+
+    var body: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(items, id: \.self) { item in
+                Button(action: { onPick(item) }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text(item)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(Color.brandAccent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background {
+                        Capsule()
+                            .fill(Color.brandAccent.opacity(0.10))
+                            .overlay {
+                                Capsule().strokeBorder(
+                                    Color.brandAccent.opacity(0.30),
+                                    lineWidth: 0.5
+                                )
+                            }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
 
 // =============================================================================
 // MARK: - Storage tab

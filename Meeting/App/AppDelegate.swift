@@ -123,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             button.subviews.forEach { $0.removeFromSuperview() }
             button.addSubview(host)
             NSLayoutConstraint.activate([
-                host.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
+                host.centerXAnchor.constraint(equalTo: button.centerXAnchor),
                 host.centerYAnchor.constraint(equalTo: button.centerYAnchor),
                 host.topAnchor.constraint(greaterThanOrEqualTo: button.topAnchor),
                 host.bottomAnchor.constraint(lessThanOrEqualTo: button.bottomAnchor),
@@ -167,9 +167,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // read fittingSize; otherwise the size reflects the previous state.
         host.layoutSubtreeIfNeeded()
         let contentWidth = host.fittingSize.width
-        // 4pt leading inset (set in the constraint above) + 6pt trailing
-        // breathing room so the timer doesn't kiss the menu bar edge.
-        let length = max(contentWidth + 10, 28)
+        // 3pt symmetric padding per side — matches what NSStatusItem
+        // gives an image-only button, and keeps the timer from kissing
+        // the menu bar edge during recording.
+        let length = contentWidth + 6
         if abs(statusItem.length - length) > 0.5 {
             statusItem.length = length
         }

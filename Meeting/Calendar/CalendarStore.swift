@@ -40,14 +40,23 @@ final class CalendarStore: ObservableObject {
     private let store = EKEventStore()
     private var refreshTask: Task<Void, Never>?
     private var changeObserverTask: Task<Void, Never>?
+    private var meEmailsObserver: AnyCancellable?
 
     /// Override hook for tests that want to substitute the "current user
-    /// email" used to mark attendees as `isMe`. nil = use the system
-    /// default (every email of every connected calendar account).
+    /// email" used to mark attendees as `isMe`. nil = read from
+    /// `AppPreferences.shared.myEmails`.
     var meEmailsOverride: Set<String>?
 
     init() {
         self.authorization = Self.mapAuth(EKEventStore.authorizationStatus(for: .event))
+
+        // Re-snapshot when the user edits their "my emails" list, so
+        // attendee.isMe flips immediately for newly fetched events.
+        meEmailsObserver = AppPreferences.shared.$myEmails
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.refresh()
+            }
 
         // Watch EKEventStoreChanged via the modern AsyncStream API rather
         // than addObserver(forName:) — the block-based observer captures
@@ -235,7 +244,8 @@ final class CalendarStore: ObservableObject {
         let name = p.name?.trimmingCharacters(in: .whitespaces).nilIfEmpty
             ?? email.flatMap { $0.components(separatedBy: "@").first }
             ?? "Unknown"
-        let isMe = email.map { meEmails.contains($0.lowercased()) } ?? p.isCurrentUser
+        let emailMatch = email.map { meEmails.contains($0.lowercased()) } ?? false
+        let isMe = emailMatch || p.isCurrentUser
         return CalendarAttendee(
             displayName: name,
             email: email,
@@ -277,11 +287,39 @@ final class CalendarStore: ObservableObject {
 
     private func meEmails() -> Set<String> {
         if let override = meEmailsOverride { return override }
-        // EventKit doesn't directly expose "the user's emails" — the
-        // closest signal is `EKParticipant.isCurrentUser`, which we
-        // consult per-attendee. So return empty here and rely on the
-        // per-participant flag in `snapshot`.
-        return []
+        return AppPreferences.shared.myEmails
+    }
+
+    /// Best-effort guesses for the user's own email addresses, derived
+    /// from EventKit metadata. Drives the "Suggested" chips in
+    /// Settings → Calendar so the user doesn't have to type emails by
+    /// hand. Sources, in order of reliability:
+    ///   1. `EKSource.title` / `EKCalendar.title` containing "@" — Google
+    ///      Workspace calendars sync with the account email as the
+    ///      calendar title.
+    ///   2. Any participant flagged `isCurrentUser=true` across the
+    ///      currently loaded snapshot.
+    func suggestedMyEmails() -> [String] {
+        var out = Set<String>()
+        // 1. Source/calendar titles that look like emails.
+        for source in store.sources {
+            if source.title.contains("@") {
+                out.insert(source.title.lowercased())
+            }
+        }
+        for cal in store.calendars(for: .event) {
+            if cal.title.contains("@") {
+                out.insert(cal.title.lowercased())
+            }
+        }
+        // 2. Anything EventKit explicitly flagged as the current user.
+        for ev in currentEvents + upcomingEvents {
+            let participants = (ev.organizer.map { [$0] } ?? []) + ev.attendees
+            for att in participants where att.isMe {
+                if let e = att.email { out.insert(e.lowercased()) }
+            }
+        }
+        return out.sorted()
     }
 }
 

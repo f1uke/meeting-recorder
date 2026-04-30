@@ -38,6 +38,18 @@ final class AppPreferences: ObservableObject {
         }
     }
 
+    /// Email addresses the user owns. Used to mark calendar attendees as
+    /// `isMe` so the speaker-mapping chips skip the user themselves.
+    /// Stored as a comma-separated string in UserDefaults; always lowercased.
+    @Published var myEmails: Set<String> {
+        didSet {
+            UserDefaults.standard.set(
+                myEmails.sorted().joined(separator: ","),
+                forKey: Keys.myEmails
+            )
+        }
+    }
+
     private init() {
         let raw = UserDefaults.standard.object(forKey: Keys.expectedSpeakers) as? Int
         self.expectedSpeakerCount = ExpectedSpeakers(storageValue: raw)
@@ -53,6 +65,12 @@ final class AppPreferences: ObservableObject {
         self.appearance = AppearancePreference(
             rawValue: UserDefaults.standard.string(forKey: Keys.appearance) ?? ""
         ) ?? .system
+        let rawEmails = UserDefaults.standard.string(forKey: Keys.myEmails) ?? ""
+        self.myEmails = Set(
+            rawEmails.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                .filter { !$0.isEmpty }
+        )
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -76,6 +94,7 @@ final class AppPreferences: ObservableObject {
         static let transcriptionLanguage = "dev.fluke.meeting.transcriptionLanguage"
         static let showMenuBarTimer = "dev.fluke.meeting.showMenuBarTimer"
         static let appearance = "dev.fluke.meeting.appearance"
+        static let myEmails = "dev.fluke.meeting.myEmails"
     }
 }
 

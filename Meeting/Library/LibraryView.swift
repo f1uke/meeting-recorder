@@ -1243,7 +1243,7 @@ private struct AttendeeChip: View {
 
 /// Minimal flow layout for attendee chips. SwiftUI's built-in `Layout`
 /// machinery; wraps to next line when horizontal space runs out.
-private struct FlowLayout: Layout {
+struct FlowLayout: Layout {
     var spacing: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {

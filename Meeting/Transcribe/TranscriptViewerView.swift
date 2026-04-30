@@ -109,7 +109,9 @@ private struct TranscriptMainPane: View {
     @State private var transcript: MergedTranscript?
     @State private var loadError: String?
     @State private var search: String = ""
+    @State private var isVideoFullScreen: Bool = false
     @StateObject private var playerModel = VideoPlayerModel()
+    @AppStorage("transcript.viewer.columnWidth") private var columnWidth: Double = 380
 
     var body: some View {
         VStack(spacing: 0) {
@@ -123,9 +125,11 @@ private struct TranscriptMainPane: View {
                     TranscriptLeftColumn(
                         meeting: meeting,
                         transcript: transcript,
-                        playerModel: playerModel
+                        playerModel: playerModel,
+                        columnWidth: $columnWidth,
+                        onToggleFullScreen: { isVideoFullScreen.toggle() }
                     )
-                    .frame(width: 380)
+                    .frame(width: columnWidth)
                     Divider().opacity(0.2)
                     TranscriptScrollPane(
                         meeting: meeting,
@@ -141,6 +145,15 @@ private struct TranscriptMainPane: View {
             }
         }
         .background(.regularMaterial)
+        .overlay {
+            if isVideoFullScreen {
+                FullscreenVideoOverlay(
+                    playerModel: playerModel,
+                    onExit: { withAnimation(.easeInOut(duration: 0.2)) { isVideoFullScreen = false } }
+                )
+                .transition(.opacity)
+            }
+        }
         .task(id: meeting.id) { await loadTranscript() }
         .onAppear {
             playerModel.load(folder: meeting.folder)
@@ -330,61 +343,256 @@ private struct TranscriptLeftColumn: View {
     let meeting: MeetingRecord
     let transcript: MergedTranscript
     @ObservedObject var playerModel: VideoPlayerModel
+    @Binding var columnWidth: Double
+    let onToggleFullScreen: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
-            VideoPanel(playerModel: playerModel)
-            SpeakersPanel(meeting: meeting, transcript: transcript)
-            MomentsPanel(meeting: meeting, playerModel: playerModel)
+            // Inset video by the same amount as the cards inside the
+            // ScrollView so they line up vertically. The 14pt inset gives
+            // every card's shadow (radius 12) clearance from the
+            // ScrollView's clip rect — without it the shadow's left/right
+            // halves get sliced off.
+            VideoPanel(
+                playerModel: playerModel,
+                columnWidth: $columnWidth,
+                onToggleFullScreen: onToggleFullScreen
+            )
+            .padding(.horizontal, 14)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 12) {
+                    SpeakersPanel(meeting: meeting, transcript: transcript)
+                    AttendeesPanel(meeting: meeting)
+                    MomentsPanel(meeting: meeting, playerModel: playerModel)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 4)
+                .padding(.bottom, 14)
+            }
+            .scrollIndicators(.hidden)
         }
-        .padding(.horizontal, 16)
         .padding(.vertical, 16)
+    }
+}
+
+/// Header row that toggles a panel's collapsed state. Chevron rotates
+/// 0° → 90° as the panel opens. The full row is the click target;
+/// trailing slot lets each panel attach its own action button (Edit
+/// for Speakers, hint label for Attendees) so it stays clickable
+/// without firing the toggle.
+private struct CollapsibleHeader<Trailing: View>: View {
+    let label: String
+    @Binding var isExpanded: Bool
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() } }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.textDim)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    SectionLabel(text: label)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            trailing()
+        }
     }
 }
 
 private struct VideoPanel: View {
     @ObservedObject var playerModel: VideoPlayerModel
+    @Binding var columnWidth: Double
+    let onToggleFullScreen: () -> Void
+
     @Environment(\.colorScheme) private var scheme
+    @AppStorage("transcript.viewer.videoHeight") private var videoHeight: Double = 220
+    @State private var dragStartHeight: Double?
+    @State private var dragStartWidth: Double?
+
+    private let minHeight: Double = 140
+    private let maxHeight: Double = 520
+    private let minWidth: Double = 320
+    private let maxWidth: Double = 760
 
     var body: some View {
         VStack(spacing: 0) {
-            if let player = playerModel.player {
-                VideoPlayer(player: player)
-                    .aspectRatio(16/10, contentMode: .fit)
-                    .background(Color.black)
-            } else {
-                ZStack {
-                    Color.black
-                    if playerModel.loadError != nil {
-                        VStack(spacing: 4) {
-                            Image(systemName: "video.slash")
-                                .font(.system(size: 22))
-                                .foregroundStyle(.white.opacity(0.5))
-                            Text("video.mov missing")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.white.opacity(0.5))
+            ZStack(alignment: .topTrailing) {
+                videoSurface
+                Button(action: onToggleFullScreen) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background {
+                            Circle().fill(.black.opacity(0.45))
+                                .background(.ultraThinMaterial, in: Circle())
                         }
-                    } else {
-                        ProgressView().tint(.white)
-                    }
                 }
-                .aspectRatio(16/10, contentMode: .fit)
+                .buttonStyle(.plain)
+                .padding(8)
+                .help("Fullscreen")
+            }
+            .frame(height: videoHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        scheme == .dark
+                            ? Color.white.opacity(0.10)
+                            : Color.black.opacity(0.12),
+                        lineWidth: 0.5
+                    )
+            }
+            .overlay(alignment: .bottomTrailing) {
+                CornerResizeHandle(
+                    width: $columnWidth,
+                    height: $videoHeight,
+                    dragStartWidth: $dragStartWidth,
+                    dragStartHeight: $dragStartHeight,
+                    widthRange: minWidth...maxWidth,
+                    heightRange: minHeight...maxHeight
+                )
+                .padding(6)
+            }
+            .shadow(
+                color: Color.black.opacity(scheme == .dark ? 0.40 : 0.18),
+                radius: 12, y: 6
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var videoSurface: some View {
+        if let player = playerModel.player {
+            VideoPlayer(player: player)
+                .background(Color.black)
+        } else {
+            ZStack {
+                Color.black
+                if playerModel.loadError != nil {
+                    VStack(spacing: 4) {
+                        Image(systemName: "video.slash")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.white.opacity(0.5))
+                        Text("video.mov missing")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                } else {
+                    ProgressView().tint(.white)
+                }
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(
-                    scheme == .dark
-                        ? Color.white.opacity(0.10)
-                        : Color.black.opacity(0.12),
-                    lineWidth: 0.5
-                )
+    }
+}
+
+/// Quarter-arc curving from top-right to bottom-left, with the bulge
+/// pulled toward the bottom-right corner — visually "wraps" the corner
+/// it's anchored to as a "drag this corner to resize" affordance.
+private struct ResizeHookShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { p in
+            p.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+            p.addQuadCurve(
+                to: CGPoint(x: rect.minX, y: rect.maxY),
+                control: CGPoint(x: rect.maxX, y: rect.maxY)
+            )
         }
-        .shadow(
-            color: Color.black.opacity(scheme == .dark ? 0.40 : 0.18),
-            radius: 12, y: 6
-        )
+    }
+}
+
+/// 2D-resize gripper at the bottom-right corner of the video. Drag freely:
+/// horizontal motion adjusts the entire left column's width (so the cards
+/// below the video resize too), vertical motion adjusts video height.
+/// Rendered as a thin curved arc that hints at the diagonal-drag direction.
+private struct CornerResizeHandle: View {
+    @Binding var width: Double
+    @Binding var height: Double
+    @Binding var dragStartWidth: Double?
+    @Binding var dragStartHeight: Double?
+    let widthRange: ClosedRange<Double>
+    let heightRange: ClosedRange<Double>
+
+    @State private var isHovering = false
+
+    private let arcSize: CGFloat = 16
+
+    var body: some View {
+        ResizeHookShape()
+            .stroke(
+                Color.white.opacity(isHovering ? 0.95 : 0.7),
+                style: StrokeStyle(lineWidth: 2, lineCap: .round)
+            )
+            .frame(width: arcSize, height: arcSize)
+            .padding(4)
+            .contentShape(Rectangle())
+            .scaleEffect(isHovering ? 1.15 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .onHover { hovering in
+                isHovering = hovering
+                // No public diagonal-resize cursor on macOS, so use
+                // crosshair as the closest "drag-to-resize" affordance.
+                if hovering {
+                    NSCursor.crosshair.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if dragStartWidth == nil { dragStartWidth = width }
+                        if dragStartHeight == nil { dragStartHeight = height }
+                        let w = (dragStartWidth ?? width) + Double(value.translation.width)
+                        let h = (dragStartHeight ?? height) + Double(value.translation.height)
+                        width = max(widthRange.lowerBound, min(widthRange.upperBound, w))
+                        height = max(heightRange.lowerBound, min(heightRange.upperBound, h))
+                    }
+                    .onEnded { _ in
+                        dragStartWidth = nil
+                        dragStartHeight = nil
+                    }
+            )
+            .help("Drag to resize")
+    }
+}
+
+/// Black overlay that takes over the entire transcript pane when the user
+/// hits the fullscreen button on `VideoPanel`. Esc / the close button
+/// returns to the inline video.
+private struct FullscreenVideoOverlay: View {
+    @ObservedObject var playerModel: VideoPlayerModel
+    let onExit: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+            if let player = playerModel.player {
+                VideoPlayer(player: player)
+                    .ignoresSafeArea()
+            } else {
+                ProgressView().tint(.white)
+            }
+            Button(action: onExit) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .background {
+                        Circle().fill(.black.opacity(0.55))
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.escape, modifiers: [])
+            .padding(20)
+            .help("Exit fullscreen (Esc)")
+        }
     }
 }
 
@@ -395,16 +603,12 @@ private struct SpeakersPanel: View {
 
     @State private var editingID: SpeakerID?
     @State private var draftName: String = ""
+    @AppStorage("transcript.viewer.expand.speakers") private var isExpanded: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                SectionLabel(text: "Speakers · \(transcript.speakers.count)")
-                Spacer()
-                Button(action: {
-                    if let id = editingID { commit(id: id) }
-                    editingID = nil
-                }) {
+            CollapsibleHeader(label: "Speakers · \(meeting.speakers.count)", isExpanded: $isExpanded) {
+                Button(action: handleEditTap) {
                     Text(editingID == nil ? "Edit" : "Done")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.brandAccent)
@@ -415,8 +619,8 @@ private struct SpeakersPanel: View {
                 .buttonStyle(.plain)
             }
 
-            ForEach(transcript.speakers) { speaker in
-                VStack(alignment: .leading, spacing: 4) {
+            if isExpanded {
+                ForEach(meeting.speakers) { speaker in
                     SpeakerRow(
                         speaker: speaker,
                         speakingTime: speakingTime(for: speaker.id),
@@ -426,14 +630,11 @@ private struct SpeakersPanel: View {
                             editingID = speaker.id
                             draftName = speaker.displayName
                         },
-                        onCommit: { commit(id: speaker.id) }
+                        onCommit: { commit(id: speaker.id) },
+                        onDropAttendee: speaker.id == .me ? nil : { name in
+                            apply(name: name, to: speaker.id)
+                        }
                     )
-                    if shouldSuggest(speaker: speaker) {
-                        AttendeeSuggestionRow(
-                            attendees: suggestableAttendees(),
-                            onPick: { name in apply(name: name, to: speaker.id) }
-                        )
-                    }
                 }
             }
         }
@@ -461,87 +662,21 @@ private struct SpeakersPanel: View {
         editingID = nil
     }
 
+    /// Top-right "Edit / Done" button: when nothing is focused, drop the
+    /// first non-Me speaker into edit mode (so a single click is enough
+    /// to start typing); when editing, commit + exit.
+    private func handleEditTap() {
+        if let id = editingID {
+            commit(id: id)
+        } else if let target = meeting.speakers.first(where: { $0.id != .me }) {
+            draftName = target.displayName
+            editingID = target.id
+        }
+    }
+
     private func apply(name: String, to id: SpeakerID) {
         library.update(meeting: meeting.id) { override in
             override.customSpeakerNames[id.rawValue] = name
-        }
-    }
-
-    /// Show suggestion chips only for raw "speaker_N" rows — once the
-    /// user (or this same flow) has named someone, we drop the chips so
-    /// the panel stays clean.
-    private func shouldSuggest(speaker: Speaker) -> Bool {
-        guard meeting.calendarEvent != nil else { return false }
-        let raw = speaker.id.rawValue
-        return speaker.displayName == raw || speaker.displayName.hasPrefix("speaker_")
-    }
-
-    /// Attendee names worth surfacing as chips: skip the user themselves
-    /// (they're already mapped to the dedicated "Me" speaker via the mic
-    /// stream) and skip anyone whose name has already been used as a
-    /// custom name on another speaker, so we don't suggest dupes.
-    private func suggestableAttendees() -> [CalendarAttendee] {
-        guard let event = meeting.calendarEvent else { return [] }
-        let already = Set(transcript.speakers.map { $0.displayName })
-        var pool: [CalendarAttendee] = []
-        if let organizer = event.organizer { pool.append(organizer) }
-        pool.append(contentsOf: event.attendees)
-        var seen = Set<String>()
-        return pool.filter { att in
-            guard !att.isMe else { return false }
-            guard seen.insert(att.id).inserted else { return false }
-            return !already.contains(att.displayName)
-        }
-        .prefix(6)
-        .map { $0 }
-    }
-}
-
-private struct AttendeeSuggestionRow: View {
-    let attendees: [CalendarAttendee]
-    let onPick: (String) -> Void
-
-    var body: some View {
-        if attendees.isEmpty {
-            EmptyView()
-        } else {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color.brandAccent)
-                Text("From calendar:")
-                    .font(.system(size: 10, weight: .semibold))
-                    .kerning(0.4)
-                    .foregroundStyle(Color.textDim)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 5) {
-                        ForEach(attendees) { att in
-                            Button {
-                                onPick(att.displayName)
-                            } label: {
-                                Text(att.displayName)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(Color.brandAccent)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background {
-                                        Capsule()
-                                            .fill(Color.brandAccent.opacity(0.10))
-                                            .overlay {
-                                                Capsule().strokeBorder(
-                                                    Color.brandAccent.opacity(0.30),
-                                                    lineWidth: 0.5
-                                                )
-                                            }
-                                    }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-            .padding(.leading, 30)
-            .padding(.bottom, 2)
         }
     }
 }
@@ -553,6 +688,13 @@ private struct SpeakerRow: View {
     @Binding var draftName: String
     let onStartEdit: () -> Void
     let onCommit: () -> Void
+    /// Called when an AttendeePill is dropped on this row. nil to disable
+    /// the drop target — used for the "Me" row, which is auto-mapped from
+    /// the mic stream.
+    let onDropAttendee: ((String) -> Void)?
+
+    @FocusState private var fieldFocused: Bool
+    @State private var isDropTarget: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -561,11 +703,14 @@ private struct SpeakerRow: View {
                 TextField("Name", text: $draftName, onCommit: onCommit)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12, weight: .semibold))
+                    .focused($fieldFocused)
+                    .onAppear { fieldFocused = true }
             } else {
                 Text(speaker.displayName)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.textPrimary)
-                    .onTapGesture(count: 2, perform: onStartEdit)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onStartEdit)
             }
             Spacer()
             Text(formatDuration(speakingTime))
@@ -573,7 +718,24 @@ private struct SpeakerRow: View {
                 .monospacedDigit()
                 .foregroundStyle(Color.textDim)
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.brandAccent.opacity(isDropTarget ? 0.12 : 0))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(
+                    Color.brandAccent.opacity(isDropTarget ? 0.55 : 0),
+                    style: StrokeStyle(lineWidth: 1.2, dash: [3, 3])
+                )
+        }
+        .modifier(SpeakerRowDropModifier(
+            isEnabled: onDropAttendee != nil,
+            isTargeted: $isDropTarget,
+            onDrop: { onDropAttendee?($0) }
+        ))
     }
 
     private var initials: String {
@@ -596,39 +758,174 @@ private struct SpeakerRow: View {
     }
 }
 
+/// Conditionally attaches a dropDestination — `.dropDestination` always
+/// installs a target, even with `isEnabled` flag, so we gate via a
+/// modifier that returns the unchanged view when disabled.
+private struct SpeakerRowDropModifier: ViewModifier {
+    let isEnabled: Bool
+    @Binding var isTargeted: Bool
+    let onDrop: (String) -> Void
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.dropDestination(for: String.self) { items, _ in
+                guard let name = items.first else { return false }
+                onDrop(name)
+                return true
+            } isTargeted: { hovering in
+                isTargeted = hovering
+            }
+        } else {
+            content
+        }
+    }
+}
+
+// =============================================================================
+// MARK: - Attendees panel (drag source)
+// =============================================================================
+
+private struct AttendeesPanel: View {
+    let meeting: MeetingRecord
+    @AppStorage("transcript.viewer.expand.attendees") private var isExpanded: Bool = true
+
+    private var pool: [CalendarAttendee] {
+        guard let event = meeting.calendarEvent else { return [] }
+        var out: [CalendarAttendee] = []
+        if let organizer = event.organizer { out.append(organizer) }
+        out.append(contentsOf: event.attendees)
+        var seen = Set<String>()
+        return out.filter { att in
+            guard !att.isMe else { return false }
+            return seen.insert(att.id).inserted
+        }
+    }
+
+    private var assignedNames: Set<String> {
+        Set(meeting.speakers.map { $0.displayName })
+    }
+
+    var body: some View {
+        if pool.isEmpty {
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                CollapsibleHeader(label: "Attendees · \(pool.count)", isExpanded: $isExpanded) {
+                    if isExpanded {
+                        HStack(spacing: 4) {
+                            Image(systemName: "hand.point.up.left")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("Drag onto a speaker")
+                                .font(.system(size: 10))
+                        }
+                        .foregroundStyle(Color.textFaint)
+                    }
+                }
+                if isExpanded {
+                    FlowLayout(spacing: 6) {
+                        ForEach(pool) { att in
+                            AttendeePill(
+                                attendee: att,
+                                isAssigned: assignedNames.contains(att.displayName)
+                            )
+                            .draggable(att.displayName) {
+                                AttendeePill(attendee: att, isAssigned: false)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(12)
+            .background {
+                GlassCard(radius: 12) { Color.clear }
+            }
+        }
+    }
+}
+
+private struct AttendeePill: View {
+    let attendee: CalendarAttendee
+    let isAssigned: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Avatar(initials: initials, color: avatarColor, size: 16)
+            Text(attendee.displayName)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(isAssigned ? Color.textFaint : Color.textPrimary)
+                .lineLimit(1)
+            if isAssigned {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.brandSuccess)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background {
+            Capsule()
+                .fill(.regularMaterial)
+                .overlay {
+                    Capsule().strokeBorder(
+                        Color.primary.opacity(0.10),
+                        lineWidth: 0.5
+                    )
+                }
+        }
+        .opacity(isAssigned ? 0.55 : 1.0)
+    }
+
+    private var initials: String {
+        let words = attendee.displayName.split(separator: " ").prefix(2)
+        let chars = words.compactMap { $0.first.map(String.init) }
+        let combined = chars.joined()
+        return combined.isEmpty ? "?" : String(combined.prefix(2)).uppercased()
+    }
+
+    private var avatarColor: Color {
+        let palette: [Color] = [.tagEngineering, .tagDesign, .tagPeople, .tagResearch, .tagOneOnOne]
+        return palette[abs(attendee.id.hashValue) % palette.count]
+    }
+}
+
 private struct MomentsPanel: View {
     let meeting: MeetingRecord
     @ObservedObject var playerModel: VideoPlayerModel
+    @AppStorage("transcript.viewer.expand.moments") private var isExpanded: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "Moments · \(meeting.marks.count)")
-            if meeting.marks.isEmpty {
-                Text("Hit ⌘B during recording to mark moments here")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.textFaint)
-                    .padding(.vertical, 4)
-            } else {
-                ForEach(meeting.marks) { mark in
-                    Button {
-                        playerModel.seek(to: mark.timestamp)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(formatTimestamp(mark.timestamp))
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .monospacedDigit()
-                                .foregroundStyle(Color.brandAccentStrong)
-                                .frame(width: 50, alignment: .leading)
-                            Text(mark.note ?? "Marked moment")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Color.textPrimary)
-                                .lineLimit(1)
-                            Spacer()
+            CollapsibleHeader(label: "Moments · \(meeting.marks.count)", isExpanded: $isExpanded) {
+                EmptyView()
+            }
+            if isExpanded {
+                if meeting.marks.isEmpty {
+                    Text("Hit ⌘B during recording to mark moments here")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textFaint)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(meeting.marks) { mark in
+                        Button {
+                            playerModel.seek(to: mark.timestamp)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(formatTimestamp(mark.timestamp))
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundStyle(Color.brandAccentStrong)
+                                    .frame(width: 50, alignment: .leading)
+                                Text(mark.note ?? "Marked moment")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(Color.textPrimary)
+                                    .lineLimit(1)
+                                Spacer()
+                            }
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
                         }
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -667,7 +964,7 @@ private struct TranscriptScrollPane: View {
                 ForEach(transcript.segments) { segment in
                     SegmentRow(
                         segment: segment,
-                        speakers: transcript.speakers,
+                        speakers: meeting.speakers,
                         searchQuery: search,
                         actionItem: actionItem(for: segment),
                         onSeek: { playerModel.seek(to: segment.start) },
