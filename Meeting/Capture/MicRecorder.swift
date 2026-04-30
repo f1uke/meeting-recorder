@@ -51,6 +51,23 @@ final class MicRecorder: @unchecked Sendable {
             return device.id
         }()
 
+        // Switch the input node to the system's voice-processing audio unit
+        // (kAudioUnitSubType_VoiceProcessingIO). This delivers Apple's built-in
+        // automatic gain control + spectral noise suppression on the captured
+        // mic stream — meaning a quiet mic gets boosted to a usable level
+        // before AAC encoding (no more -44 LUFS recordings) and steady-state
+        // background noise is attenuated. Echo cancellation is best-effort:
+        // it works against audio our engine renders, which we don't, so the
+        // post-process AEC against output.m4a still does the heavy lifting.
+        // Side-effects: the input format flips to 16/24 kHz mono after this
+        // call, which is why we re-query the format on the next line.
+        do {
+            try input.setVoiceProcessingEnabled(true)
+        } catch {
+            NSLog("[Meeting/Mic] setVoiceProcessingEnabled failed: %@ — falling back to raw input",
+                  String(describing: error))
+        }
+
         let inputFormat = input.outputFormat(forBus: 0)
 
         // Resolve the device's display name for UI sublabels. Prefer the

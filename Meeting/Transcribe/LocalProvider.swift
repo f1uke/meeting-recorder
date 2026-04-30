@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 import WhisperKit
 import SpeakerKit
 
@@ -84,17 +85,36 @@ actor LocalProvider: TranscriptionProvider {
                 let refPath = refURL.path(percentEncoded: false)
                 if FileManager.default.fileExists(atPath: refPath) {
                     let reference = try Self.loadAudioArray(path: refPath, providerName: name)
-                    let shift = AudioPreprocessor.findReferenceShift(
+                    if let shift = AudioPreprocessor.findReferenceShift(
                         mic: audio, reference: reference
-                    )
-                    AudioPreprocessor.subtractEcho(
-                        mic: &audio,
-                        reference: reference,
-                        referenceShift: shift
-                    )
-                    NSLog("[Meeting/Transcribe] AEC: ref=%.1fs shift=%dms taps=1024",
-                          Double(reference.count) / 16000,
-                          shift * 1000 / 16000)
+                    ) {
+                        // Hold a copy so we can revert if NLMS diverges. AEC
+                        // can blow up when reference and mic don't actually
+                        // share content (e.g. the recording was made before
+                        // the output-tap sample-rate fix and the two streams
+                        // drift apart linearly). Better to drop AEC than feed
+                        // Whisper out-of-range floats.
+                        let backup = audio
+                        AudioPreprocessor.subtractEcho(
+                            mic: &audio,
+                            reference: reference,
+                            referenceShift: shift
+                        )
+                        var postPeak: Float = 0
+                        vDSP_maxmgv(audio, 1, &postPeak, vDSP_Length(audio.count))
+                        if postPeak > 1.5 {
+                            audio = backup
+                            NSLog("[Meeting/Transcribe] AEC reverted: post-peak=%.2f (NLMS diverged)",
+                                  postPeak)
+                        } else {
+                            NSLog("[Meeting/Transcribe] AEC: ref=%.1fs shift=%dms taps=1024 post-peak=%.3f",
+                                  Double(reference.count) / 16000,
+                                  shift * 1000 / 16000,
+                                  postPeak)
+                        }
+                    } else {
+                        NSLog("[Meeting/Transcribe] AEC skipped: cross-correlation found no reliable shift (mic and reference may be misaligned or at different effective rates)")
+                    }
                 } else {
                     NSLog("[Meeting/Transcribe] AEC skipped: reference missing at %@", refPath)
                 }
@@ -175,13 +195,31 @@ actor LocalProvider: TranscriptionProvider {
 
         let variant = modelVariant
         let downloadBase = ModelStorage.downloadBase()
+        let customFolder = ModelVariant(rawValue: variant)?.customModelFolder
         let task = Task<KitBox, Error> {
-            let config = WhisperKitConfig(
-                model: variant,
-                downloadBase: downloadBase,
-                verbose: false,
-                logLevel: .error
-            )
+            let config: WhisperKitConfig
+            if let custom = customFolder {
+                let configFile = custom.appendingPathComponent("config.json")
+                guard FileManager.default.fileExists(atPath: configFile.path(percentEncoded: false)) else {
+                    throw TranscriptionError.modelLoadFailed(
+                        "\(variant): converted model not found at \(custom.path(percentEncoded: false)). Run tools/biodatlab-whisper-th/setup.sh once to convert it."
+                    )
+                }
+                config = WhisperKitConfig(
+                    model: variant,
+                    modelFolder: custom.path(percentEncoded: false),
+                    verbose: false,
+                    logLevel: .error,
+                    download: false
+                )
+            } else {
+                config = WhisperKitConfig(
+                    model: variant,
+                    downloadBase: downloadBase,
+                    verbose: false,
+                    logLevel: .error
+                )
+            }
             do {
                 let kit = try await WhisperKit(config)
                 return KitBox(kit: kit)

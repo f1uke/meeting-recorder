@@ -30,6 +30,17 @@ enum HallucinationFilter {
         "♪ music ♪",
         "music",
         "applause",
+        // Thai-language YouTube boilerplate the large-v3 model emits at chunk
+        // boundaries when it can't decode the underlying audio. None of these
+        // appear naturally in a work meeting — safe to drop on a sub-1.5s match.
+        "โปรดติดตามตอนต่อไป",
+        "ขอบคุณที่รับชมครับ",
+        "ขอบคุณที่รับชมค่ะ",
+        "ขอบคุณที่รับชม",
+        "ขอบคุณที่รับฟัง",
+        "อย่าลืมกดติดตาม",
+        "อย่าลืมกดไลค์กดติดตาม",
+        "แล้วเจอกันใหม่ตอนหน้า",
     ]
 
     /// Returns true if the segment text matches a known boilerplate hallucination

@@ -198,6 +198,19 @@ enum ExpectedSpeakers: Hashable, CaseIterable {
 enum ModelVariant: String, CaseIterable, Identifiable, Sendable {
     case largeV3 = "large-v3"
     case largeV3Turbo = "large-v3-turbo"
+    /// Thai-fine-tuned Whisper Large v3 from biodatlab (Mahidol). Same
+    /// architecture as OpenAI's whisper-large-v3 (32-layer decoder, full
+    /// attention), only the weights are fine-tuned — so whisperkittools
+    /// converts it cleanly. Not on argmaxinc/whisperkit-coreml: run
+    /// `tools/biodatlab-whisper-th/setup.sh` once to convert it locally;
+    /// `LocalProvider` then loads it from Application Support.
+    ///
+    /// We tried `biodatlab/distill-whisper-th-large-v3` first, but the
+    /// distilled architecture (2-layer decoder + custom token head) is
+    /// not handled correctly by whisperkittools' generic conversion path
+    /// — it produced plausible-but-meaningless Thai. The non-distilled
+    /// variant here is the working alternative.
+    case biodatlabThLargeV3 = "biodatlab-whisper-th-large-v3"
 
     var id: String { rawValue }
 
@@ -205,6 +218,7 @@ enum ModelVariant: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .largeV3: "Large v3 (accurate)"
         case .largeV3Turbo: "Large v3 Turbo (fast)"
+        case .biodatlabThLargeV3: "Whisper TH Large v3 (Thai-tuned)"
         }
     }
 
@@ -212,6 +226,20 @@ enum ModelVariant: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .largeV3: "Best for Thai / multilingual content. ~3-5× real-time."
         case .largeV3Turbo: "~10-15× real-time. Risk of mis-detecting Thai as English when language is Auto."
+        case .biodatlabThLargeV3: "biodatlab Thai fine-tune. Run tools/biodatlab-whisper-th/setup.sh once before selecting."
+        }
+    }
+
+    /// Returns the local model folder if this variant ships outside the
+    /// argmaxinc HF repo. `nil` for stock variants → WhisperKit downloads
+    /// from `argmaxinc/whisperkit-coreml` as usual.
+    var customModelFolder: URL? {
+        switch self {
+        case .largeV3, .largeV3Turbo:
+            return nil
+        case .biodatlabThLargeV3:
+            return URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support/dev.fluke.meeting/Models/custom/biodatlab-whisper-th-large-v3")
         }
     }
 }

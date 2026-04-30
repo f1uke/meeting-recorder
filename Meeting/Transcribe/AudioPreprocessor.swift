@@ -25,26 +25,33 @@ enum AudioPreprocessor {
     }
 
     /// Find the integer sample shift S such that `reference[i+S]` is the
-    /// best match for `mic[i]`. Returned shift is positive when the
+    /// best match for `mic[i]`. Returned shift is negative when the
     /// reference array starts later in real time than mic (the typical
     /// case here, since the Core Audio Tap is the last capture stream
     /// to come online and therefore lags the mic by 50–300 ms).
-    /// Searches in `±searchSeconds` over the first `analysisSeconds` of
-    /// audio. Returns 0 if neither stream is usable (e.g. silence).
+    ///
+    /// Returns `nil` when the best correlation lies at the search-window
+    /// boundary or its strength is indistinguishable from background —
+    /// both signal that no real correlation exists (e.g. mic and reference
+    /// are at different effective rates because of a sample-rate-tag bug
+    /// in the source file). The caller should skip AEC on `nil`; running
+    /// NLMS with a phantom shift makes the filter chase noise and diverge.
     static func findReferenceShift(
         mic: [Float],
         reference: [Float],
         searchSeconds: Double = 0.5,
         analysisSeconds: Double = 8,
         sampleRate: Double = 16000
-    ) -> Int {
+    ) -> Int? {
         let maxShift = Int(searchSeconds * sampleRate)
         let window = min(mic.count, Int(analysisSeconds * sampleRate))
         guard window > 1000,
-              reference.count > window + 2 * maxShift else { return 0 }
+              reference.count > window + 2 * maxShift else { return nil }
 
-        var bestCorr: Float = -.infinity
+        var bestCorr: Float = 0
         var bestShift = 0
+        var sumCorr: Double = 0
+        var samples = 0
         mic.withUnsafeBufferPointer { mPtr in
             reference.withUnsafeBufferPointer { rPtr in
                 for shift in -maxShift...maxShift {
@@ -59,12 +66,23 @@ enum AudioPreprocessor {
                         vDSP_Length(window)
                     )
                     let absCorr = abs(corr)
+                    sumCorr += Double(absCorr)
+                    samples += 1
                     if absCorr > bestCorr {
                         bestCorr = absCorr
                         bestShift = shift
                     }
                 }
             }
+        }
+        // Reject if best landed at the search boundary — usually means
+        // there is no real correlation peak inside the window.
+        if abs(bestShift) >= maxShift { return nil }
+        // Reject if the peak isn't materially above the average — same
+        // signal: cross-correlation surface is flat, no echo path to lock onto.
+        if samples > 0 {
+            let mean = Float(sumCorr / Double(samples))
+            if bestCorr < mean * 2.5 { return nil }
         }
         return bestShift
     }
@@ -97,7 +115,16 @@ enum AudioPreprocessor {
 
         var weights = [Float](repeating: 0, count: filterLen)
         let mu = stepSize
-        let eps: Float = 1e-6
+        // Larger eps on the energy denominator so quiet reference windows
+        // don't push the step size into runaway territory. With raw eps=1e-6,
+        // a near-silent ref (energy ≈ 0) caused mu*error/eps to spike weights
+        // by hundreds in a single sample, which then drove the predicted echo
+        // to wildly negative values — and on the next iteration the error
+        // would be huge in the opposite direction. The output mic peak then
+        // exploded to ~+40 dBFS and Whisper hung on the resulting NaN-adjacent
+        // values. 0.01 corresponds to a ref window with RMS around -23 dBFS,
+        // below which we effectively freeze adaptation rather than chase noise.
+        let eps: Float = 0.01
 
         weights.withUnsafeMutableBufferPointer { wPtr in
             reference.withUnsafeBufferPointer { rPtr in
@@ -120,7 +147,11 @@ enum AudioPreprocessor {
                             vDSP_Length(filterLen)
                         )
                         let error = mPtr[i] - echo
-                        mPtr[i] = error
+                        // Defense in depth: cap each output sample to a
+                        // physically reasonable range so a weight transient
+                        // doesn't propagate downstream and break Whisper's
+                        // log-mel front-end. Real PCM is in [-1, 1].
+                        mPtr[i] = max(-2.0, min(2.0, error))
 
                         var energy: Float = 0
                         vDSP_svesq(

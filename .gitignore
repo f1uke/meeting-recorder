@@ -24,3 +24,6 @@ tools/**/*.wav
 tools/whisper/models/
 *.gguf
 *.bin
+tools/biodatlab-whisper-th/venv/
+tools/biodatlab-whisper-th/whisperkittools/
+tools/biodatlab-whisper-th/_workspace/
