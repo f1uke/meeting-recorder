@@ -71,20 +71,21 @@ actor GeminiProvider: TranscriptionProvider {
         let generateEnd = options.withDiarization ? 0.70 : 1.0
         progress?(0)
 
-        // Chunk the audio at 60 s boundaries before sending to Gemini.
+        // Chunk the audio at 90 s boundaries before sending to Gemini.
         // Without chunking, LLM-based transcription drifts on long audio:
-        // attention dilutes → timestamps wander, late content gets summarized
-        // or hallucinated. Empirically Gemini stays accurate for the first
-        // ~2 min of any single audio prompt, then content quality degrades
-        // and timestamps detach from the audio; 60 s keeps every chunk well
-        // inside the tight-attention window. Mic preprocessing (AEC /
-        // normalize / mute gate) is folded into chunk preparation since
-        // both need the float array.
+        // attention dilutes → timestamps wander, late content gets
+        // summarized or hallucinated. Empirically 60 s was the safe
+        // window for Flash; 2.5 Pro holds attention longer so 90 s
+        // works without quality loss and shaves a third off the chunk
+        // count for long meetings (2 hr → 80 instead of 120 chunks,
+        // saving ~33% of the per-day RPD ceiling). Mic preprocessing
+        // (AEC / normalize / mute gate) is folded into chunk preparation
+        // since both need the float array.
         let chunks = try CloudAudioPrep.prepareChunks(
             audioURL: audioURL,
             options: options,
             tempPrefix: "gemini",
-            chunkDuration: 60,
+            chunkDuration: 90,
             providerName: name,
             logTag: "Gemini"
         )
@@ -97,10 +98,11 @@ actor GeminiProvider: TranscriptionProvider {
         // Process up to `maxConcurrent` chunks in parallel. Each chunk owns
         // an independent upload → waitActive → generateContent pipeline,
         // so concurrent chunks share nothing but the URLSession (which is
-        // built for parallel use). Bounded at 4 so we don't fan out wider
-        // than typical paid-tier RPM windows comfortably absorb. Free-tier
-        // users on tight quota should drop the chunk size or this cap.
-        let maxConcurrent = 4
+        // built for parallel use). 8 keeps peak burst around 50 RPM —
+        // a third of the Tier 1 paid 2.5-Pro RPM ceiling — so retries
+        // and other in-flight work have plenty of headroom. Free-tier
+        // users on the tight 5 RPM quota should drop this to 1.
+        let maxConcurrent = 8
         let aggregator = ChunkProgressAggregator(count: chunks.count) { fraction in
             progress?(fraction * generateEnd)
         }
