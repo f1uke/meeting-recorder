@@ -108,64 +108,21 @@ actor LocalProvider: TranscriptionProvider {
         // length once via AVAudioFile (cheap header parse, no full decode).
         let fileDuration: Double = needsArrayPath ? 0 : Self.audioDurationSeconds(at: audioURL) ?? 0
         if needsArrayPath {
-            // Array path: load the file as a 16 kHz mono float, optionally
-            // (1) cancel speaker echo using a reference audio stream,
-            // (2) gate muted-mic ranges, and (3) peak-normalize, then feed
-            // the resulting array to Whisper directly. The on-disk archive
-            // is unchanged — preprocessing only affects what the model sees.
+            // Array path: load the file as a 16 kHz mono float, then
+            // delegate to `CloudAudioPrep.applyVoicedPreprocessing` for
+            // voiced-aware AEC + normalize + zero-outside-voiced. Whisper
+            // sees a full-length array with the original timestamps
+            // preserved (voice-active samples stay at their original index,
+            // muted/short regions become zero), so its VAD chunker still
+            // picks the right boundaries. Mic stream gets the speed win;
+            // the output stream never enters this path so it's unaffected.
             var audio = try Self.loadAudioArray(path: path, providerName: name)
-
-            if let refURL = options.referenceAudioURL {
-                let refPath = refURL.path(percentEncoded: false)
-                if FileManager.default.fileExists(atPath: refPath) {
-                    let reference = try Self.loadAudioArray(path: refPath, providerName: name)
-                    if let shift = AudioPreprocessor.findReferenceShift(
-                        mic: audio, reference: reference
-                    ) {
-                        // Hold a copy so we can revert if NLMS diverges. AEC
-                        // can blow up when reference and mic don't actually
-                        // share content (e.g. the recording was made before
-                        // the output-tap sample-rate fix and the two streams
-                        // drift apart linearly). Better to drop AEC than feed
-                        // Whisper out-of-range floats.
-                        let backup = audio
-                        AudioPreprocessor.subtractEcho(
-                            mic: &audio,
-                            reference: reference,
-                            referenceShift: shift
-                        )
-                        var postPeak: Float = 0
-                        vDSP_maxmgv(audio, 1, &postPeak, vDSP_Length(audio.count))
-                        if postPeak > 1.5 {
-                            audio = backup
-                            NSLog("[Meeting/Transcribe] AEC reverted: post-peak=%.2f (NLMS diverged)",
-                                  postPeak)
-                        } else {
-                            NSLog("[Meeting/Transcribe] AEC: ref=%.1fs shift=%dms taps=1024 post-peak=%.3f",
-                                  Double(reference.count) / 16000,
-                                  shift * 1000 / 16000,
-                                  postPeak)
-                        }
-                    } else {
-                        NSLog("[Meeting/Transcribe] AEC skipped: cross-correlation found no reliable shift (mic and reference may be misaligned or at different effective rates)")
-                    }
-                } else {
-                    NSLog("[Meeting/Transcribe] AEC skipped: reference missing at %@", refPath)
-                }
-            }
-
-            if options.normalizeLoudness {
-                let (preDB, postDB) = AudioPreprocessor.peakNormalize(&audio)
-                NSLog("[Meeting/Transcribe] normalize: %.1f dBFS → %.1f dBFS", preDB, postDB)
-            }
-
-            if let muted = options.mutedIntervals, !muted.isEmpty {
-                Self.applyGate(to: &audio, sampleRate: 16000, mutedIntervals: muted)
-                NSLog("[Meeting/Transcribe] mic gate applied: %d intervals → %.1fs of %.1fs zeroed",
-                      muted.count,
-                      muted.reduce(0) { $0 + ($1.end - $1.start) },
-                      Double(audio.count) / 16000)
-            }
+            CloudAudioPrep.applyVoicedPreprocessing(
+                to: &audio,
+                sampleRate: 16000,
+                options: options,
+                logTag: "Local"
+            )
 
             chunks = try await Self.runTranscribeArray(
                 box: kit,
@@ -350,24 +307,6 @@ actor LocalProvider: TranscriptionProvider {
             )
         } catch {
             throw TranscriptionError.providerFailed(providerName, underlying: error)
-        }
-    }
-
-    /// Zero-fill samples that fall inside any muted interval. Operates in
-    /// place so a 1-hour mic file (~57 MB float array) doesn't double its
-    /// memory footprint during the copy.
-    private static func applyGate(
-        to audio: inout [Float],
-        sampleRate: Double,
-        mutedIntervals: [MutedInterval]
-    ) {
-        for interval in mutedIntervals {
-            let startSample = max(0, Int(interval.start * sampleRate))
-            let endSample = min(audio.count, Int(interval.end * sampleRate))
-            guard startSample < endSample else { continue }
-            for i in startSample..<endSample {
-                audio[i] = 0
-            }
         }
     }
 

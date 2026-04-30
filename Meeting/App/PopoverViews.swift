@@ -447,6 +447,21 @@ struct PopoverTranscribingView: View {
     /// `TranscriptionSession`. Animated so the bar slides smoothly between
     /// poll ticks rather than stepping.
     let overall: Double
+    @ObservedObject private var prefs = AppPreferences.shared
+
+    /// Privacy/network footprint footer that depends on the active engine.
+    /// Local: stays on-device. Cloud: text leaves the device, but speaker
+    /// embeddings (SpeakerKit diarization) still run locally.
+    private var footnote: String {
+        switch prefs.transcriptionEngine {
+        case .local:
+            return "Running locally on your Mac. No data leaves the device."
+        case .gemini:
+            return "Sending audio to Google Gemini for text. Diarization stays on this Mac."
+        case .openai:
+            return "Sending audio to OpenAI for text. Diarization stays on this Mac."
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -490,7 +505,7 @@ struct PopoverTranscribingView: View {
                         }
                     }
 
-                    Text("Running locally on your Mac. No data leaves the device.")
+                    Text(footnote)
                         .font(.system(size: 11))
                         .foregroundStyle(Color.textDim)
                 }

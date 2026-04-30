@@ -2,6 +2,33 @@ import Foundation
 import WhisperKit
 import SpeakerKit
 
+/// Lock-protected per-chunk progress accumulator. Each chunk task owns one
+/// slot, writes monotonically increasing 0...1 fractions; the aggregator
+/// republishes the mean across all slots so the bar advances smoothly even
+/// when chunks complete out of dispatch order.
+private final class ChunkProgressAggregator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var perChunk: [Double]
+    private let report: (@Sendable (Double) -> Void)?
+
+    init(count: Int, report: (@Sendable (Double) -> Void)?) {
+        self.perChunk = Array(repeating: 0, count: max(count, 1))
+        self.report = report
+    }
+
+    func update(index: Int, fraction: Double) {
+        let total: Double
+        lock.lock()
+        let clamped = max(0, min(1, fraction))
+        if index < perChunk.count, clamped > perChunk[index] {
+            perChunk[index] = clamped
+        }
+        total = perChunk.reduce(0, +) / Double(perChunk.count)
+        lock.unlock()
+        report?(total)
+    }
+}
+
 /// Cloud transcription via Google's Gemini API.
 ///
 /// Flow:
@@ -71,16 +98,20 @@ actor GeminiProvider: TranscriptionProvider {
         let generateEnd = options.withDiarization ? 0.70 : 1.0
         progress?(0)
 
-        // Chunk the audio at ~6 min boundaries before sending to Gemini.
+        // Chunk the audio at 60 s boundaries before sending to Gemini.
         // Without chunking, LLM-based transcription drifts on long audio:
         // attention dilutes → timestamps wander, late content gets summarized
-        // or hallucinated. 6 min keeps each chunk well within the model's
-        // accurate window. Mic preprocessing (AEC / normalize / mute gate)
-        // is folded into chunk preparation since both need the float array.
+        // or hallucinated. Empirically Gemini stays accurate for the first
+        // ~2 min of any single audio prompt, then content quality degrades
+        // and timestamps detach from the audio; 60 s keeps every chunk well
+        // inside the tight-attention window. Mic preprocessing (AEC /
+        // normalize / mute gate) is folded into chunk preparation since
+        // both need the float array.
         let chunks = try CloudAudioPrep.prepareChunks(
             audioURL: audioURL,
             options: options,
             tempPrefix: "gemini",
+            chunkDuration: 60,
             providerName: name,
             logTag: "Gemini"
         )
@@ -90,24 +121,67 @@ actor GeminiProvider: TranscriptionProvider {
             }
         }
 
-        // Process chunks serially. Parallelizing would multiply free-tier
-        // quota pressure (each chunk = 1 generateContent call) and Pro RPD
-        // is brutal already.
-        var allCloudSegments: [CloudSegment] = []
-        for (idx, chunk) in chunks.enumerated() {
-            let chunkStart = generateEnd * Double(idx) / Double(chunks.count)
-            let chunkBand = generateEnd / Double(chunks.count)
-            let chunkProgress: @Sendable (Double) -> Void = { fraction in
-                progress?(chunkStart + max(0, min(1, fraction)) * chunkBand)
-            }
-            let segs = try await transcribeOneChunk(
-                audioURL: chunk.url,
-                offset: chunk.offset,
-                language: options.language,
-                onProgress: chunkProgress
-            )
-            allCloudSegments.append(contentsOf: segs)
+        // Process up to `maxConcurrent` chunks in parallel. Each chunk owns
+        // an independent upload → waitActive → generateContent pipeline,
+        // so concurrent chunks share nothing but the URLSession (which is
+        // built for parallel use). Bounded at 4 so we don't fan out wider
+        // than typical paid-tier RPM windows comfortably absorb. Free-tier
+        // users on tight quota should drop the chunk size or this cap.
+        let maxConcurrent = 4
+        let aggregator = ChunkProgressAggregator(count: chunks.count) { fraction in
+            progress?(fraction * generateEnd)
         }
+        let collected = try await withThrowingTaskGroup(of: (Int, [CloudSegment]).self) { group in
+            var dispatched = 0
+            // Seed the initial wave.
+            while dispatched < min(maxConcurrent, chunks.count) {
+                let idx = dispatched
+                let chunk = chunks[idx]
+                let language = options.language
+                group.addTask { [self] in
+                    let segs = try await transcribeOneChunk(
+                        audioURL: chunk.url,
+                        offset: chunk.offset,
+                        language: language,
+                        onProgress: { fraction in
+                            aggregator.update(index: idx, fraction: fraction)
+                        }
+                    )
+                    return (idx, segs)
+                }
+                dispatched += 1
+            }
+            // Drain + refill: as each chunk lands, dispatch the next one
+            // until every chunk has been queued.
+            var results: [(Int, [CloudSegment])] = []
+            results.reserveCapacity(chunks.count)
+            while let result = try await group.next() {
+                results.append(result)
+                if dispatched < chunks.count {
+                    let idx = dispatched
+                    let chunk = chunks[idx]
+                    let language = options.language
+                    group.addTask { [self] in
+                        let segs = try await transcribeOneChunk(
+                            audioURL: chunk.url,
+                            offset: chunk.offset,
+                            language: language,
+                            onProgress: { fraction in
+                                aggregator.update(index: idx, fraction: fraction)
+                            }
+                        )
+                        return (idx, segs)
+                    }
+                    dispatched += 1
+                }
+            }
+            return results
+        }
+        // Restore source-audio chronological order — TaskGroup yields in
+        // completion order, but downstream merging assumes sorted segments.
+        let allCloudSegments = collected
+            .sorted { $0.0 < $1.0 }
+            .flatMap { $0.1 }
         progress?(generateEnd)
 
         // Diarize (or assign known speaker) and produce final result.
@@ -175,7 +249,7 @@ actor GeminiProvider: TranscriptionProvider {
     /// single chunk. Reports its own 0...1 progress; the caller maps that
     /// into the appropriate band of the overall progress bar. Returns
     /// chunk segments with the chunk's offset already baked into start/end.
-    private func transcribeOneChunk(
+    private nonisolated func transcribeOneChunk(
         audioURL: URL,
         offset: TimeInterval,
         language: String?,
@@ -230,7 +304,7 @@ actor GeminiProvider: TranscriptionProvider {
     ///
     /// Backoff: 2s, 6s, 18s. Tuned around Gemini's typical 503 windows
     /// (a few seconds of overload that clear quickly).
-    private func sendWithRetry(
+    private nonisolated func sendWithRetry(
         label: String,
         maxAttempts: Int = 4,
         _ send: () async throws -> (Data, URLResponse)
@@ -264,7 +338,7 @@ actor GeminiProvider: TranscriptionProvider {
         }
     }
 
-    private func shouldRetryStatus(_ code: Int) -> Bool {
+    private nonisolated func shouldRetryStatus(_ code: Int) -> Bool {
         // 429 is RESOURCE_EXHAUSTED — usually a daily/per-minute quota
         // ceiling, not transient overload. Retrying eats user time without
         // improving the outcome (the quota window doesn't move on the
@@ -297,14 +371,14 @@ actor GeminiProvider: TranscriptionProvider {
         return "HTTP \(status) — \(raw.prefix(300))"
     }
 
-    private func retryDelay(attempt: Int) -> Double {
+    private nonisolated func retryDelay(attempt: Int) -> Double {
         // 2, 6, 18, 54... — Gemini's overload windows usually clear in <30s
         // so by attempt 3-4 we've waited long enough that further retries
         // are mostly throwing good time after bad.
         2.0 * pow(3.0, Double(attempt - 1))
     }
 
-    private func isRetryableNetworkError(_ error: Error) -> Bool {
+    private nonisolated func isRetryableNetworkError(_ error: Error) -> Bool {
         guard let urlError = error as? URLError else { return false }
         switch urlError.code {
         case .timedOut, .networkConnectionLost, .cannotConnectToHost,
@@ -326,7 +400,7 @@ actor GeminiProvider: TranscriptionProvider {
 
     /// Resumable upload (2 round trips): metadata POST → bytes upload.
     /// Reports 0...1 progress for the bytes phase.
-    private func uploadFile(
+    private nonisolated func uploadFile(
         at audioURL: URL,
         onProgress: @Sendable (Double) -> Void
     ) async throws -> UploadedFile {
@@ -401,7 +475,7 @@ actor GeminiProvider: TranscriptionProvider {
 
     /// Poll `GET /v1beta/{name}` until state is ACTIVE, FAILED, or we
     /// time out. Audio files typically reach ACTIVE in 2-10 seconds.
-    private func waitUntilActive(name: String, timeout: TimeInterval = 120) async throws {
+    private nonisolated func waitUntilActive(name: String, timeout: TimeInterval = 120) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(name)")!
         struct Wire: Decodable { let state: String? }
@@ -419,12 +493,15 @@ actor GeminiProvider: TranscriptionProvider {
                 default: break  // PROCESSING → keep polling
                 }
             }
-            try await Task.sleep(nanoseconds: 1_500_000_000)
+            // 60s-chunk WAVs typically reach ACTIVE in 1-3s; polling at
+            // 500ms keeps total wait close to actual processing latency
+            // without spamming the API (peak 2 req/s per concurrent chunk).
+            try await Task.sleep(nanoseconds: 500_000_000)
         }
         throw TranscriptionError.providerFailed(self.name, underlying: GeminiError.fileProcessingTimeout)
     }
 
-    private func deleteFile(name: String) async throws {
+    private nonisolated func deleteFile(name: String) async throws {
         let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(name)")!
         var req = URLRequest(url: url)
         req.httpMethod = "DELETE"
@@ -441,7 +518,7 @@ actor GeminiProvider: TranscriptionProvider {
         let language: String?
     }
 
-    private func runGenerateContent(
+    private nonisolated func runGenerateContent(
         fileURI: String,
         mimeType: String,
         language: String?
@@ -568,7 +645,7 @@ actor GeminiProvider: TranscriptionProvider {
         }
     }
 
-    private func systemInstruction(language: String?) -> String {
+    private nonisolated func systemInstruction(language: String?) -> String {
         let langHint: String
         switch language {
         case "th": langHint = "The audio is primarily Thai with frequent inline English technical terms."
@@ -675,7 +752,7 @@ actor GeminiProvider: TranscriptionProvider {
 
     // MARK: - Misc
 
-    private func mimeType(for url: URL) -> String {
+    private nonisolated func mimeType(for url: URL) -> String {
         switch url.pathExtension.lowercased() {
         case "m4a", "mp4": return "audio/mp4"
         case "wav":        return "audio/wav"
