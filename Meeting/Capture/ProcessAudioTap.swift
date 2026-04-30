@@ -90,23 +90,43 @@ final class ProcessAudioTap: @unchecked Sendable {
         guard err == noErr else { throw TapError.aggregate(err) }
         aggregateDeviceID = aggID
 
+        // The tap reports its native rate (typically 48 kHz) but the
+        // aggregate device's drift-compensated IOProc delivers samples at
+        // the main sub-device's clock rate (e.g. 44.1 kHz on AirPods). If
+        // we declare the file at the tap's native rate, the recorded data
+        // is labelled with the wrong sample rate → playback is too fast
+        // and duration is short by (1 - aggRate/tapRate). Re-derive the
+        // delivery format from the aggregate's nominal rate.
+        let aggRate = (try? Self.readDeviceNominalSampleRate(deviceID: aggID)) ?? format.sampleRate
+        let deliveryFormat: AVAudioFormat = {
+            guard aggRate > 0, abs(aggRate - format.sampleRate) > 0.5 else { return format }
+            NSLog("[Meeting/Tap] rate mismatch: tap=%.0f agg=%.0f — using aggregate rate",
+                  format.sampleRate, aggRate)
+            return AVAudioFormat(
+                commonFormat: format.commonFormat,
+                sampleRate: aggRate,
+                channels: format.channelCount,
+                interleaved: format.isInterleaved
+            ) ?? format
+        }()
+
         // On-disk format = AAC in MPEG-4 container (.m4a).
-        // Processing format = whatever the tap delivers (typically non-interleaved float32).
+        // Processing format = whatever the aggregate delivers (typically non-interleaved float32).
         // AVAudioFile encodes buffer → AAC automatically on write.
         let fileSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: format.sampleRate,
-            AVNumberOfChannelsKey: format.channelCount,
+            AVSampleRateKey: deliveryFormat.sampleRate,
+            AVNumberOfChannelsKey: deliveryFormat.channelCount,
             AVEncoderBitRateKey: 96_000,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
         ]
         let file = try AVAudioFile(
             forWriting: url,
             settings: fileSettings,
-            commonFormat: format.commonFormat,
-            interleaved: format.isInterleaved
+            commonFormat: deliveryFormat.commonFormat,
+            interleaved: deliveryFormat.isInterleaved
         )
-        let box = AudioFileBox(file: file, format: format, rmsBuffer: rmsBuffer)
+        let box = AudioFileBox(file: file, format: deliveryFormat, rmsBuffer: rmsBuffer)
         fileBox = box
 
         var procID: AudioDeviceIOProcID?
@@ -254,6 +274,19 @@ final class ProcessAudioTap: @unchecked Sendable {
         )
         guard err == noErr else { throw TapError.outputDevice(err) }
         return deviceID
+    }
+
+    private static func readDeviceNominalSampleRate(deviceID: AudioDeviceID) throws -> Float64 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let err = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
+        guard err == noErr else { throw TapError.deviceUID(err) }
+        return rate
     }
 
     private static func readDeviceUID(deviceID: AudioDeviceID) throws -> String {
