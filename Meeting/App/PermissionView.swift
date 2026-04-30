@@ -58,6 +58,9 @@ struct PermissionView: View {
                 }
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.textDim)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -70,6 +73,9 @@ struct PermissionView: View {
                 }
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.textDim)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
@@ -172,6 +178,7 @@ private struct PermissionRow: View {
                             ))
                             .shadow(color: Color.brandAccentStrong.opacity(0.4), radius: 4, y: 2)
                     }
+                    .contentShape(Capsule())
             }
             .buttonStyle(.plain)
         }

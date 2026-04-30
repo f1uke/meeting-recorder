@@ -94,6 +94,7 @@ private struct NavRailButton: View {
                             .fill(Color.primary.opacity(0.10))
                     }
                 }
+                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -202,9 +203,14 @@ private struct TranscriptToolbar: View {
     var body: some View {
         HStack(spacing: 8) {
             HStack(spacing: 5) {
-                Button("Library") { appState.route = .library }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.textDim)
+                Button(action: { appState.route = .library }) {
+                    Text("Library")
+                        .foregroundStyle(Color.textDim)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Color.textFaint)
@@ -310,6 +316,7 @@ private struct ToolbarPill: View {
                             .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                     }
             }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -394,13 +401,18 @@ private struct SpeakersPanel: View {
             HStack {
                 SectionLabel(text: "Speakers · \(transcript.speakers.count)")
                 Spacer()
-                Button(editingID == nil ? "Edit" : "Done") {
+                Button(action: {
                     if let id = editingID { commit(id: id) }
                     editingID = nil
+                }) {
+                    Text(editingID == nil ? "Edit" : "Done")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.brandAccent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.brandAccent)
             }
 
             ForEach(transcript.speakers) { speaker in
@@ -650,9 +662,12 @@ private struct SegmentRow: View {
                         .font(.system(size: 11, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(Color.textDim)
+                        .padding(.vertical, 2)
+                        .padding(.horizontal, 4)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, 26)
+                .padding(.leading, 22)
             }
             .frame(width: 110, alignment: .leading)
 

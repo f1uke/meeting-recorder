@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Owns the menu bar status item and the popover panel.
@@ -25,6 +26,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var labelHost: NSHostingView<MenuBarLabel>?
+    /// Combine subscriptions for SwiftUI state → statusItem width sync.
+    /// `NSStatusItem.variableLength` only auto-sizes based on `button.image`
+    /// or `button.title`; once we replace the image with a hosting view, we
+    /// have to drive `statusItem.length` ourselves whenever the SwiftUI
+    /// content's fitting size changes (idle → recording → transcribing).
+    private var labelObservers: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menu-bar-first app: no Dock icon, keep running after the last
@@ -111,12 +118,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.addSubview(host)
             NSLayoutConstraint.activate([
                 host.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
-                host.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -4),
-                host.topAnchor.constraint(equalTo: button.topAnchor),
-                host.bottomAnchor.constraint(equalTo: button.bottomAnchor),
+                host.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                host.topAnchor.constraint(greaterThanOrEqualTo: button.topAnchor),
+                host.bottomAnchor.constraint(lessThanOrEqualTo: button.bottomAnchor),
             ])
             labelHost = host
         }
+
+        // Drive statusItem.length from SwiftUI's fitting size whenever
+        // the recording or transcription state changes — otherwise the
+        // status bar button stays the width it had at attach time and
+        // clips wider content (e.g. "0:00" timer next to the red dot).
+        labelObservers.removeAll()
+        Publishers.CombineLatest(state.recording.$state, state.transcribe.$state)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshStatusItemWidth()
+            }
+            .store(in: &labelObservers)
+        // Initial size — content is already laid out at attach time.
+        refreshStatusItemWidth()
 
         // 2. Build the popover with NSHostingController hosting the
         // SwiftUI MenuBarPopoverView. `.preferredContentSize` lets the
@@ -132,6 +153,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.sizingOptions = .preferredContentSize
         popover.contentViewController = host
         self.popover = popover
+    }
+
+    private func refreshStatusItemWidth() {
+        guard let statusItem, let host = labelHost else { return }
+        // Force SwiftUI/AppKit to flush the latest layout pass before we
+        // read fittingSize; otherwise the size reflects the previous state.
+        host.layoutSubtreeIfNeeded()
+        let contentWidth = host.fittingSize.width
+        // 4pt leading inset (set in the constraint above) + 6pt trailing
+        // breathing room so the timer doesn't kiss the menu bar edge.
+        let length = max(contentWidth + 10, 28)
+        if abs(statusItem.length - length) > 0.5 {
+            statusItem.length = length
+        }
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {

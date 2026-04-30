@@ -18,21 +18,52 @@ final class ToastPresenter: ObservableObject {
         speakerCount: Int,
         folder: URL
     ) {
-        let info = TranscriptReadyInfo(
+        let info = ToastInfo(
+            headline: "Transcript ready",
             title: meetingTitle,
             subtitle: subtitleLine(duration: durationText, speakers: speakerCount),
-            transcriptURL: folder.appendingPathComponent("transcript.md"),
+            openTarget: folder.appendingPathComponent("transcript.md"),
             folder: folder
         )
-        present(view: TranscriptReadyToastView(
+        present(view: ToastView(
             info: info,
             onOpen: { [weak self] in
-                NSWorkspace.shared.activateFileViewerSelecting([info.transcriptURL])
+                NSWorkspace.shared.activateFileViewerSelecting([info.openTarget])
                 self?.dismiss()
             },
             onDismiss: { [weak self] in self?.dismiss() }
         ))
         scheduleAutoDismiss(after: 8)
+    }
+
+    /// Animate in a "Recording saved" toast — used by Stop only when the
+    /// user wants to skip transcription and head straight to the next
+    /// meeting. Open button reveals the meeting folder in Finder so they
+    /// can confirm the audio/video files landed.
+    func showRecordingSaved(
+        meetingTitle: String,
+        durationText: String,
+        folder: URL
+    ) {
+        let subtitle = durationText.isEmpty
+            ? "Transcribe later from Library"
+            : "\(durationText) · Transcribe later from Library"
+        let info = ToastInfo(
+            headline: "Recording saved",
+            title: meetingTitle,
+            subtitle: subtitle,
+            openTarget: folder,
+            folder: folder
+        )
+        present(view: ToastView(
+            info: info,
+            onOpen: { [weak self] in
+                NSWorkspace.shared.activateFileViewerSelecting([info.openTarget])
+                self?.dismiss()
+            },
+            onDismiss: { [weak self] in self?.dismiss() }
+        ))
+        scheduleAutoDismiss(after: 6)
     }
 
     /// Force-dismiss the current toast (no-op if none).
@@ -128,78 +159,57 @@ final class ToastPresenter: ObservableObject {
 
 // MARK: - Content
 
-struct TranscriptReadyInfo: Sendable {
+struct ToastInfo: Sendable {
+    let headline: String
     let title: String
     let subtitle: String
-    let transcriptURL: URL
+    let openTarget: URL
     let folder: URL
 }
 
-struct TranscriptReadyToastView: View {
-    let info: TranscriptReadyInfo
+struct ToastView: View {
+    let info: ToastInfo
     let onOpen: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(LinearGradient(
-                        colors: [Color.brandSuccess, Color.brandSuccess.opacity(0.7)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 38, height: 38)
-                    .shadow(color: Color.brandSuccess.opacity(0.4), radius: 4, y: 2)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white)
-            }
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 26))
+                .foregroundStyle(.green)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Transcript ready")
+            VStack(alignment: .leading, spacing: 1) {
+                Text(info.headline)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.textPrimary)
-                Text("\(info.title) · \(info.subtitle)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.textDim)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                Text(info.title)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if !info.subtitle.isEmpty {
+                    Text(info.subtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button(action: onOpen) {
-                Text("Open")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6)
-                    .background {
-                        RoundedRectangle(cornerRadius: 7)
-                            .fill(LinearGradient(
-                                colors: [Color.brandAccent, Color.brandAccentStrong],
-                                startPoint: .top, endPoint: .bottom
-                            ))
-                            .shadow(color: Color.brandAccentStrong.opacity(0.4), radius: 3, y: 1)
-                    }
-            }
-            .buttonStyle(.plain)
+            Button("Open", action: onOpen)
 
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.textFaint)
                     .padding(4)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
         }
         .padding(14)
         .frame(width: 360, height: 88)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.30), radius: 24, y: 8)
-        }
-        .glassBorder(cornerRadius: 14)
-        .padding(8)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }

@@ -27,10 +27,14 @@ struct MeetingApp: App {
             RootView()
                 .appEnvironment(appState)
         }
+        .defaultSize(width: 1180, height: 760)
+        .windowResizability(.contentMinSize)
         .commands {
-            AppCommands(recording: appState.recording) {
-                Task { await appState.stopAndTranscribe() }
-            }
+            AppCommands(
+                recording: appState.recording,
+                stopAndTranscribe: { Task { await appState.stopAndTranscribe() } },
+                stopOnly: { Task { await appState.stopOnly() } }
+            )
         }
 
         // Standalone Settings window. ⌘, in `AppCommands` opens it.

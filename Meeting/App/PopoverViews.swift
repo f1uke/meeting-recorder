@@ -148,14 +148,31 @@ struct PopoverRecordingView: View {
                 onMark: { recording.mark() }
             )
 
-            GlassButton(style: .danger, action: stopAndTranscribe) {
-                HStack(spacing: 6) {
-                    Image(systemName: "stop.fill")
-                    Text("Stop & Transcribe")
-                    Text("⌘.").font(.mono(10)).opacity(0.7)
+            VStack(spacing: 6) {
+                GlassButton(style: .danger, action: stopAndTranscribe) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "stop.fill")
+                        Text("Stop & Transcribe")
+                        Text("⌘.").font(.mono(10)).opacity(0.7)
+                    }
                 }
+                .keyboardShortcut(".", modifiers: .command)
+
+                Button(action: stopOnly) {
+                    HStack(spacing: 4) {
+                        Text("Stop only · Save for later")
+                        Text("⇧⌘.").font(.mono(10)).opacity(0.7)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.textDim)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(".", modifiers: [.command, .shift])
+                .help("Stop the recording and save it. Transcribe later from Library.")
             }
-            .keyboardShortcut(".", modifiers: .command)
         }
     }
 
@@ -172,6 +189,10 @@ struct PopoverRecordingView: View {
 
     private func stopAndTranscribe() {
         Task { await appState.stopAndTranscribe() }
+    }
+
+    private func stopOnly() {
+        Task { await appState.stopOnly() }
     }
 }
 
@@ -198,11 +219,16 @@ struct PopoverTransientView: View {
                     .padding(.horizontal, 16)
             }
             if let onCancel {
-                Button("Cancel", action: onCancel)
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.brandAccent)
-                    .padding(.top, 4)
+                Button(action: onCancel) {
+                    Text("Cancel")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.brandAccent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity)
@@ -472,6 +498,8 @@ struct RecentSection: View {
                     }
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.brandAccent)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -616,6 +644,9 @@ struct BookmarksChip: View {
                 }
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.brandAccent)
+                .padding(.vertical, 3)
+                .padding(.horizontal, 4)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .keyboardShortcut("b", modifiers: .command)

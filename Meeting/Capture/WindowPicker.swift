@@ -128,6 +128,7 @@ struct WindowPicker: View {
                         .foregroundStyle(Color.brandAccent)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Refresh window list")

@@ -11,6 +11,7 @@ import SwiftUI
 struct AppCommands: Commands {
     @ObservedObject var recording: RecordingSession
     let stopAndTranscribe: () -> Void
+    let stopOnly: () -> Void
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -35,6 +36,12 @@ struct AppCommands: Commands {
                 stopAndTranscribe()
             }
             .keyboardShortcut(".", modifiers: .command)
+            .disabled(!recording.isRecording)
+
+            Button("Stop Only") {
+                stopOnly()
+            }
+            .keyboardShortcut(".", modifiers: [.command, .shift])
             .disabled(!recording.isRecording)
         }
     }

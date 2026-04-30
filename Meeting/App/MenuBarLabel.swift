@@ -16,25 +16,27 @@ struct MenuBarLabel: View {
         switch (recording.state, transcribe.state) {
         case let (.recording(_, started), _):
             HStack(spacing: 4) {
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 7, height: 7)
+                Image(systemName: "circle.fill")
+                    .foregroundStyle(.red)
                 if prefs.showMenuBarTimer {
                     // Built-in self-updating timer — no per-second tick needed.
                     Text(started, style: .timer)
                         .monospacedDigit()
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                 }
             }
+            .font(.system(size: 13))
 
         case (_, .running):
             HStack(spacing: 3) {
                 Image(systemName: "waveform")
-                Text("…").font(.system(size: 11, weight: .medium))
+                Text("…").font(.system(size: 13, weight: .medium))
             }
+            .font(.system(size: 13))
 
         default:
             Image(systemName: "mic.fill")
+                .font(.system(size: 13))
         }
     }
 }

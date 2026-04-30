@@ -193,6 +193,7 @@ private struct SidebarRow: View {
                         .fill(Color.primary.opacity(0.10))
                 }
             }
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -204,6 +205,7 @@ private struct SidebarRow: View {
 
 private struct GeneralTab: View {
     @ObservedObject private var prefs = AppPreferences.shared
+    @EnvironmentObject private var appState: AppState
     @State private var launchAtLoginRegistered: Bool = SMAppService.mainApp.status == .enabled
     @State private var launchAtLoginError: String?
 
@@ -258,7 +260,45 @@ private struct GeneralTab: View {
                     label: \.displayName
                 )
             }
+
+            SettingsSection(label: "Notifications") {
+                ActionRow(
+                    title: "Test “Recording saved”",
+                    description: "Fires the toast shown after Stop only.",
+                    buttonLabel: "Send",
+                    action: testRecordingSavedToast
+                )
+                Divider().opacity(0.4)
+                ActionRow(
+                    title: "Test “Transcript ready”",
+                    description: "Fires the toast shown after Stop & Transcribe.",
+                    buttonLabel: "Send",
+                    action: testTranscriptReadyToast
+                )
+            }
         }
+    }
+
+    private var meetingsFolder: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/Meetings")
+    }
+
+    private func testRecordingSavedToast() {
+        appState.toast.showRecordingSaved(
+            meetingTitle: "Test meeting",
+            durationText: "8m",
+            folder: meetingsFolder
+        )
+    }
+
+    private func testTranscriptReadyToast() {
+        appState.toast.showTranscriptReady(
+            meetingTitle: "Test meeting",
+            durationText: "8m",
+            speakerCount: 3,
+            folder: meetingsFolder
+        )
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
@@ -392,6 +432,8 @@ private struct MicPickerRow: View {
                 Button(action: onRefresh) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12, weight: .semibold))
+                        .padding(6)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Refresh device list")
@@ -704,6 +746,32 @@ private struct MenuRow<Value: Hashable>: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .fixedSize()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct ActionRow: View {
+    let title: String
+    let description: String?
+    let buttonLabel: String
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.textPrimary)
+                if let description {
+                    Text(description)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textDim)
+                }
+            }
+            Spacer(minLength: 8)
+            Button(buttonLabel, action: action)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)

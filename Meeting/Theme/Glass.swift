@@ -169,10 +169,10 @@ struct GlassButton<Label: View>: View {
                 .background { background }
                 .overlay { highlight }
                 .clipShape(Capsule(style: .continuous))
+                .contentShape(Capsule(style: .continuous))
                 .shadow(color: shadowColor, radius: shadowRadius, y: shadowY)
         }
         .buttonStyle(.plain)
-        .contentShape(Capsule(style: .continuous))
     }
 
     private var background: some View {
@@ -264,8 +264,8 @@ struct GlassIconButton: View {
                         lineWidth: 0.5
                     )
                 }
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .contentShape(Circle())
     }
 }

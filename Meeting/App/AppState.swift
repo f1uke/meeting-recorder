@@ -63,6 +63,31 @@ final class AppState: ObservableObject {
         await refreshPermissions()
     }
 
+    /// Stop the active recording without running transcription. Used when
+    /// the user has another meeting starting immediately and doesn't want
+    /// to wait — the audio/video files are saved to the meeting folder so
+    /// they can re-transcribe later from the Library.
+    func stopOnly() async {
+        // Capture the start time before stop() resets state to .idle so we
+        // can show an accurate duration in the toast (transcript.json hasn't
+        // been written yet, so MeetingRecord.duration is nil at this point).
+        let startedAt: Date? = {
+            if case let .recording(_, started) = recording.state { return started }
+            return nil
+        }()
+        await recording.stop()
+        guard let folder = recording.lastFolder else { return }
+        library.rescan()
+        let duration = startedAt.map { Date().timeIntervalSince($0) }
+        if let record = library.meetings.first(where: { $0.folder == folder }) {
+            toast.showRecordingSaved(
+                meetingTitle: record.title,
+                durationText: formatDuration(duration),
+                folder: folder
+            )
+        }
+    }
+
     /// Stop the active recording and immediately kick off transcription on
     /// the resulting folder. Used by both the popover and the expanded
     /// Recording window so the post-stop flow stays consistent.

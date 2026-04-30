@@ -184,6 +184,7 @@ private struct SidebarRow: View {
                         .fill(Color.primary.opacity(0.10))
                 }
             }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -414,6 +415,7 @@ private struct MeetingRow: View {
                         .shadow(color: Color.brandAccentStrong.opacity(0.30), radius: 6, y: 2)
                 }
             }
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
         .simultaneousGesture(
@@ -667,6 +669,7 @@ private struct ToolbarButton: View {
                             .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
                     }
             }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -754,10 +757,12 @@ private struct DetailHero: View {
 private struct SpeakersStrip: View {
     let meeting: MeetingRecord
 
+    private let columns = [GridItem(.adaptive(minimum: 130), spacing: 8, alignment: .leading)]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionLabel(text: "Speakers · \(meeting.speakers.count)")
-            HStack(spacing: 8) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
                 ForEach(meeting.speakers) { speaker in
                     SpeakerCard(speaker: speaker)
                 }
@@ -770,16 +775,16 @@ private struct SpeakerCard: View {
     let speaker: Speaker
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Avatar(initials: initials, color: avatarColor, size: 18)
-                Text(speaker.displayName)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color.textPrimary)
-            }
+        HStack(spacing: 6) {
+            Avatar(initials: initials, color: avatarColor, size: 18)
+            Text(speaker.displayName)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
-        .frame(minWidth: 100)
         .background {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(.regularMaterial)
