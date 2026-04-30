@@ -31,6 +31,7 @@ struct SettingsView: View {
                         subtitle: "Tweak Whisper chunking, hallucination filters, and post-processing.",
                         icon: "waveform"
                     )
+                    case .permissions:   PermissionsTab()
                     case .calendar:      CalendarTab()
                     case .aiPrivacy:     ComingSoonTab(
                         title: "AI & Privacy",
@@ -79,13 +80,14 @@ struct SettingsView: View {
 // =============================================================================
 
 enum SettingsTab: Hashable, CaseIterable {
-    case general, recording, transcription, calendar, aiPrivacy, shortcuts, storage, about
+    case general, recording, transcription, permissions, calendar, aiPrivacy, shortcuts, storage, about
 
     var label: String {
         switch self {
         case .general:       "General"
         case .recording:     "Recording"
         case .transcription: "Transcription"
+        case .permissions:   "Permissions"
         case .calendar:      "Calendar"
         case .aiPrivacy:     "AI & Privacy"
         case .shortcuts:     "Shortcuts"
@@ -99,6 +101,7 @@ enum SettingsTab: Hashable, CaseIterable {
         case .general:       "house"
         case .recording:     "mic"
         case .transcription: "waveform"
+        case .permissions:   "lock.shield"
         case .calendar:      "calendar"
         case .aiPrivacy:     "sparkles"
         case .shortcuts:     "command"
@@ -109,7 +112,10 @@ enum SettingsTab: Hashable, CaseIterable {
 
     /// Display a NEW pill next to this tab's row in the sidebar.
     var isNew: Bool {
-        self == .calendar
+        switch self {
+        case .calendar, .permissions: true
+        default: false
+        }
     }
 }
 
@@ -488,6 +494,139 @@ private struct ModelPickerRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+}
+
+// =============================================================================
+// MARK: - Permissions tab
+// =============================================================================
+
+private struct PermissionsTab: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            DetailHeader(
+                title: "Permissions",
+                subtitle: "Required permissions are checked at the popover gate; optional ones unlock extra features and can be granted any time."
+            )
+
+            SettingsSection(label: "Required") {
+                let required = Permission.allCases.filter { $0.isRequired }
+                ForEach(Array(required.enumerated()), id: \.element) { index, permission in
+                    PermissionSettingRow(permission: permission)
+                    if index < required.count - 1 {
+                        Divider().opacity(0.3)
+                    }
+                }
+            }
+
+            SettingsSection(label: "Optional") {
+                let optional = Permission.allCases.filter { !$0.isRequired }
+                ForEach(Array(optional.enumerated()), id: \.element) { index, permission in
+                    PermissionSettingRow(permission: permission, extraNote: optionalContext(for: permission))
+                    if index < optional.count - 1 {
+                        Divider().opacity(0.3)
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Refresh") {
+                    Task { await appState.refreshPermissions() }
+                }
+                .controlSize(.small)
+                Button("Open System Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    /// Per-permission rationale shown only in the optional section. Required
+    /// perms already have their detail line; the extra note is for the
+    /// "what does this unlock?" context that's hard to fit in the row.
+    private func optionalContext(for permission: Permission) -> String? {
+        switch permission {
+        case .accessibility:
+            return "When granted, Meeting reads Google Meet's mic-button state in Chrome and skips transcribing the moments you were muted (no more Whisper hallucinations on echo / silence)."
+        case .calendar:
+            return "When granted, Meeting auto-fills meeting titles and attendee lists from your Calendar, and reminds you 5 minutes before scheduled calls."
+        default:
+            return nil
+        }
+    }
+}
+
+private struct PermissionSettingRow: View {
+    let permission: Permission
+    var extraNote: String? = nil
+    @EnvironmentObject private var appState: AppState
+
+    private var granted: Bool { appState.permissions.granted(for: permission) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: iconName)
+                    .font(.system(size: 13))
+                    .foregroundStyle(granted ? Color.brandSuccess : Color.textDim)
+                    .frame(width: 18)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(permission.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.textPrimary)
+                    Text(permission.detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let extraNote {
+                        Text(extraNote)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 2)
+                    }
+                }
+                Spacer(minLength: 8)
+                statusControl
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+        }
+    }
+
+    @ViewBuilder
+    private var statusControl: some View {
+        if granted {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+                Text("Granted")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(Color.brandSuccess)
+        } else {
+            Button("Allow") {
+                Task { await appState.request(permission) }
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private var iconName: String {
+        switch permission {
+        case .screenRecording: "rectangle.on.rectangle"
+        case .microphone: "mic.fill"
+        case .audioCapture: "speaker.wave.2.fill"
+        case .accessibility: "accessibility"
+        case .calendar: "calendar"
+        }
     }
 }
 
