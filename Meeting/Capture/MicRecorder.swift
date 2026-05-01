@@ -51,23 +51,24 @@ final class MicRecorder: @unchecked Sendable {
             return device.id
         }()
 
-        // Switch the input node to the system's voice-processing audio unit
-        // (kAudioUnitSubType_VoiceProcessingIO). This delivers Apple's built-in
-        // automatic gain control + spectral noise suppression on the captured
-        // mic stream — meaning a quiet mic gets boosted to a usable level
-        // before AAC encoding (no more -44 LUFS recordings) and steady-state
-        // background noise is attenuated. Echo cancellation is best-effort:
-        // it works against audio our engine renders, which we don't, so the
-        // post-process AEC against output.m4a still does the heavy lifting.
-        // Side-effects: the input format flips to 16/24 kHz mono after this
-        // call, which is why we re-query the format on the next line.
-        do {
-            try input.setVoiceProcessingEnabled(true)
-        } catch {
-            NSLog("[Meeting/Mic] setVoiceProcessingEnabled failed: %@ — falling back to raw input",
-                  String(describing: error))
-        }
-
+        // Stay on the raw input audio unit. We previously switched to
+        // `kAudioUnitSubType_VoiceProcessingIO` via `setVoiceProcessingEnabled(true)`
+        // for Apple's AGC + spectral noise suppression, but VPIO is a
+        // *system-wide singleton*: when our engine grabs it while the
+        // meeting app (Zoom / Discord / Meet / Slack / Teams — anything
+        // doing AEC) also has a VPIO unit live, the two contend inside
+        // the shared `vp::vx::Voice_Processor` and the meeting app's
+        // downlink (speaker out) starts losing sample timestamps:
+        //   "failed to process downlink voice proc … audio time stamp
+        //    does not have valid sample time"
+        //   "failed to run downlink DSP (I/O fault)"
+        //   "HALC_ProxyIOContext: skipping cycle due to overload"
+        // Net symptom for the user: zero meeting audio out their
+        // speakers for the entire recording, until they hit Stop. Raw
+        // input means we lose AGC + NS on the mic — quiet mics produce
+        // quiet recordings — but that's recoverable in post-process
+        // (volume normalize during transcription) and the meeting being
+        // audible at all is non-negotiable.
         let inputFormat = input.outputFormat(forBus: 0)
 
         // Resolve the device's display name for UI sublabels. Prefer the
