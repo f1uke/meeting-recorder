@@ -365,9 +365,25 @@ private struct DetailToolbar: View {
     @AppStorage("dev.fluke.meeting.summaryDisclosureSeen") private var disclosureSeen = false
     @State private var showDisclosure = false
     @State private var showRetranscribeConfirm = false
+    @State private var showOverwriteNoteConfirm = false
 
     private var summaryEnabled: Bool {
         meeting.hasTranscript && appState.llmAvailability == .available
+    }
+
+    private var noteEnabled: Bool {
+        meeting.hasTranscript &&
+            appState.llmAvailability == .available &&
+            !isGeneratingNote
+    }
+
+    private var isGeneratingNote: Bool {
+        if case .running = appState.noteGeneration[meeting.id] { return true }
+        return false
+    }
+
+    private var noteAlreadyExists: Bool {
+        FileManager.default.fileExists(atPath: appState.meetingNoteURL(for: meeting).path)
     }
 
     private var hasAudio: Bool {
@@ -391,6 +407,18 @@ private struct DetailToolbar: View {
             return
         }
         await appState.generateSummary(for: meeting)
+    }
+
+    private func generateOrRegenerateNote() {
+        if !disclosureSeen {
+            showDisclosure = true
+            return
+        }
+        if noteAlreadyExists {
+            showOverwriteNoteConfirm = true
+            return
+        }
+        Task { await appState.generateMeetingNote(for: meeting) }
     }
 
     var body: some View {
@@ -431,6 +459,18 @@ private struct DetailToolbar: View {
                 : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
             )
 
+            ToolbarButton(
+                icon: isGeneratingNote ? "ellipsis" : "doc.text",
+                label: isGeneratingNote ? "Writing…" : "Note"
+            ) {
+                generateOrRegenerateNote()
+            }
+            .disabled(!noteEnabled)
+            .help(noteEnabled
+                ? "Generate a Markdown meeting note in \(AppPreferences.shared.meetingNotesFolder)"
+                : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
+            )
+
             ToolbarButton(icon: "square.and.arrow.up", label: "Share") {
                 NSWorkspace.shared.activateFileViewerSelecting([meeting.folder])
             }
@@ -468,6 +508,14 @@ private struct DetailToolbar: View {
             }
         } message: {
             Text("This overwrites transcript.json, transcript.md, and transcript.srt. Any inline segment edits in the Transcript Viewer will be lost. The cached AI summary will become out of date — regenerate it after.")
+        }
+        .alert("Overwrite existing note?", isPresented: $showOverwriteNoteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Regenerate", role: .destructive) {
+                Task { await appState.generateMeetingNote(for: meeting) }
+            }
+        } message: {
+            Text("\(appState.meetingNoteURL(for: meeting).lastPathComponent) already exists in your vault. Regenerating will replace its contents.")
         }
     }
 
@@ -862,12 +910,14 @@ private struct ActionItemRow: View {
 // MARK: - Context items (clipboard + browser-URL captures)
 // =============================================================================
 
-/// Read-only card on the Library detail surfacing what the user copied
-/// and which links they opened during the meeting. The Transcript Viewer
-/// adds the per-item delete affordance — this view is just for context
-/// at-a-glance while scanning the meeting list.
+/// Card on the Library detail surfacing what the user copied and which
+/// links they opened during the meeting, with per-item delete. Same
+/// curation behaviour as the Transcript Viewer's ContextPanel — the
+/// user can prune unrelated copies before the next AI summary picks
+/// them up.
 struct ContextItemsSection: View {
     let meeting: MeetingRecord
+    @EnvironmentObject private var library: MeetingsLibrary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -877,13 +927,19 @@ struct ContextItemsSection: View {
                     .foregroundStyle(Color.textDim)
                 SectionLabel(text: "Captured · \(meeting.contextItems.count)")
                 Spacer()
-                Text("Edit in Transcript")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.textFaint)
             }
             VStack(spacing: 4) {
                 ForEach(meeting.contextItems) { item in
-                    ContextItemRow(item: item, meetingFolder: meeting.folder)
+                    ContextItemRow(
+                        item: item,
+                        meetingFolder: meeting.folder,
+                        onDelete: {
+                            library.deleteContextItem(
+                                meeting: meeting.id,
+                                itemID: item.id
+                            )
+                        }
+                    )
                 }
             }
         }

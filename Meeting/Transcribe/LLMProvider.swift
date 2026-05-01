@@ -52,6 +52,12 @@ protocol LLMProvider: Sendable {
     func availability() async -> LLMAvailability
 
     func generateSummary(context: MeetingLLMContext) async throws -> Summary
+
+    /// Render a complete Markdown meeting note for the user's notes
+    /// vault (designed for Obsidian, but the output is plain Markdown
+    /// + YAML frontmatter so any vault works). The provider returns
+    /// the rendered string; the caller writes it to disk.
+    func generateMeetingNote(context: MeetingLLMContext) async throws -> String
 }
 
 /// Bundle handed to `LLMProvider.generateSummary`. Beyond the bare
@@ -59,12 +65,18 @@ protocol LLMProvider: Sendable {
 /// items can reference real participants) and the calendar event
 /// (title + attendees give the model meeting purpose). `contextItems`
 /// carries clipboard + browser-URL captures so the model can pull
-/// links / quoted text into the summary.
+/// links / quoted text into the summary. `meetingFolder` is the
+/// folder all this meeting's artifacts live in — providers that
+/// shell out to a CLI (like Claude) chdir into it so referenced
+/// files (clipboard/<filename>.png, transcript.md, etc.) resolve
+/// against the meeting's data root and the model can Read them
+/// directly without absolute paths.
 struct MeetingLLMContext: Sendable {
     let transcript: MergedTranscript
     let speakerProfiles: [SpeakerProfile]
     let calendarEvent: CalendarEvent?
     let contextItems: [ContextItem]
+    let meetingFolder: URL
 }
 
 enum LLMAvailability: Sendable, Equatable {

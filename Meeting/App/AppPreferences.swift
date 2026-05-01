@@ -118,6 +118,15 @@ final class AppPreferences: ObservableObject {
         }
     }
 
+    /// Destination folder where `Generate Note` writes the per-meeting
+    /// Markdown file (designed for an Obsidian vault). Stored as the
+    /// path string; resolved to URL at write time. Empty string falls
+    /// back to `~/Documents/Obsidian/Fluke/meeting-notes/` so a fresh
+    /// install lands in a sensible place without first opening Settings.
+    @Published var meetingNotesFolder: String {
+        didSet { UserDefaults.standard.set(meetingNotesFolder, forKey: Keys.meetingNotesFolder) }
+    }
+
     private init() {
         let raw = UserDefaults.standard.object(forKey: Keys.expectedSpeakers) as? Int
         self.expectedSpeakerCount = ExpectedSpeakers(storageValue: raw)
@@ -159,6 +168,10 @@ final class AppPreferences: ObservableObject {
         } else {
             self.groupExpansions = [:]
         }
+        let storedNotesFolder = UserDefaults.standard.string(forKey: Keys.meetingNotesFolder) ?? ""
+        self.meetingNotesFolder = storedNotesFolder.isEmpty
+            ? Self.defaultMeetingNotesFolder
+            : storedNotesFolder
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -174,6 +187,12 @@ final class AppPreferences: ObservableObject {
     func applyAppKitSideEffects() {
         appearance.apply()
     }
+
+    /// Default Obsidian vault path for meeting notes, used when the
+    /// stored value is empty. Tilde-expanded so `~/Documents/...` works
+    /// regardless of the running user.
+    static let defaultMeetingNotesFolder =
+        ("~/Documents/Obsidian/Fluke/meeting-notes" as NSString).expandingTildeInPath
 
     private enum Keys {
         static let expectedSpeakers = "dev.fluke.meeting.expectedSpeakers"
@@ -191,6 +210,7 @@ final class AppPreferences: ObservableObject {
         static let appearance = "dev.fluke.meeting.appearance"
         static let myEmails = "dev.fluke.meeting.myEmails"
         static let groupExpansions = "dev.fluke.meeting.groupExpansions"
+        static let meetingNotesFolder = "dev.fluke.meeting.meetingNotesFolder"
     }
 }
 

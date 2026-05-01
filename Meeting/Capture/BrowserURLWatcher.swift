@@ -12,7 +12,22 @@ import AppKit
 /// AppleScript's `URL of active tab` is the documented public API and
 /// every Chromium browser + Safari supports it.
 ///
-/// Runs the AppleScript via the `osascript` subprocess on a detached
+/// Two-phase lifecycle per browser:
+///  1. enumerate — first tick after `start()` lists every currently-
+///     open tab's URL via AppleScript and records them as "already
+///     seen" without capturing. This is what stops the recording
+///     target's tab (e.g. the Google Meet meeting URL) and any other
+///     pre-existing reference tabs from polluting the captured list:
+///     the user only wanted *new* navigation captured, not whatever
+///     was open at recording start.
+///  2. poll — every subsequent tick reads only the front tab. URLs
+///     not in the seen set are captured as new, and added to the set
+///     so they don't repeat. Switching back to a pre-existing tab
+///     (already in the snapshot) is silently skipped — exactly the
+///     "don't capture tabs I just looked at" behavior the user asked
+///     for.
+///
+/// Runs both AppleScripts via the `osascript` subprocess on a detached
 /// task — NSAppleScript.executeAndReturnError pumps Apple events through
 /// the calling thread's runloop, which means a hung target browser (or
 /// a hidden TCC approval dialog) freezes the entire main thread.
@@ -28,9 +43,16 @@ import AppKit
 final class BrowserURLWatcher {
     private let collector: ContextCollector
     private var timer: Timer?
-    /// Last URL captured per bundle ID. Used to dedupe consecutive polls
-    /// of the same tab — only navigation events get added.
-    private var lastURL: [String: String] = [:]
+    /// URLs we've already captured (or snapshotted as pre-existing) per
+    /// bundle ID. Anything in here is silently skipped on subsequent
+    /// polls so the same tab doesn't get logged repeatedly and tabs
+    /// open at recording start don't pollute the captured list.
+    private var seenURLs: [String: Set<String>] = [:]
+    /// Bundle IDs whose initial enumeration has completed (success or
+    /// failure). Until set, the watcher won't poll the front tab — it
+    /// runs the full enumeration first so the recording target URL
+    /// (and any other pre-open tabs) get pre-populated as "seen".
+    private var enumerated: Set<String> = []
     /// Bundle IDs whose poll subprocess hasn't returned yet. Skipped on
     /// subsequent ticks so we don't spawn N parallel `osascript` calls
     /// for the same target.
@@ -41,19 +63,23 @@ final class BrowserURLWatcher {
     }
 
     /// Browsers we know how to script. Each entry pairs the bundle ID
-    /// (used to check if it's running) with the AppleScript fragment
-    /// that returns "<URL>\n<title>". Order doesn't matter.
+    /// (used to check if it's running) with two AppleScript fragments:
+    /// one that lists every open tab's URL (one per line) for the
+    /// snapshot pass, and one that returns the front tab's
+    /// `URL\ntitle` for ongoing polls.
     private struct Target: Sendable {
         let bundleID: String
         let displayName: String
-        let script: String
+        let enumerateScript: String
+        let frontTabScript: String
     }
 
     private static let targets: [Target] = [
         Target(
             bundleID: "com.apple.Safari",
             displayName: "Safari",
-            script: """
+            enumerateScript: safariEnumerateScript,
+            frontTabScript: """
             tell application "Safari"
                 if (count of windows) is 0 then return ""
                 set theTab to current tab of front window
@@ -68,26 +94,56 @@ final class BrowserURLWatcher {
         Target(
             bundleID: "com.google.Chrome",
             displayName: "Google Chrome",
-            script: chromeScript(for: "Google Chrome")
+            enumerateScript: chromeEnumerateScript(for: "Google Chrome"),
+            frontTabScript: chromeFrontTabScript(for: "Google Chrome")
         ),
         Target(
             bundleID: "com.microsoft.edgemac",
             displayName: "Microsoft Edge",
-            script: chromeScript(for: "Microsoft Edge")
+            enumerateScript: chromeEnumerateScript(for: "Microsoft Edge"),
+            frontTabScript: chromeFrontTabScript(for: "Microsoft Edge")
         ),
         Target(
             bundleID: "com.brave.Browser",
             displayName: "Brave Browser",
-            script: chromeScript(for: "Brave Browser")
+            enumerateScript: chromeEnumerateScript(for: "Brave Browser"),
+            frontTabScript: chromeFrontTabScript(for: "Brave Browser")
         ),
         Target(
             bundleID: "company.thebrowser.Browser",
             displayName: "Arc",
-            script: chromeScript(for: "Arc")
+            enumerateScript: chromeEnumerateScript(for: "Arc"),
+            frontTabScript: chromeFrontTabScript(for: "Arc")
         ),
     ]
 
-    private static func chromeScript(for app: String) -> String {
+    private static let safariEnumerateScript = """
+    tell application "Safari"
+        set output to ""
+        repeat with w in windows
+            repeat with t in tabs of w
+                set output to output & (URL of t) & linefeed
+            end repeat
+        end repeat
+        return output
+    end tell
+    """
+
+    private static func chromeEnumerateScript(for app: String) -> String {
+        """
+        tell application "\(app)"
+            set output to ""
+            repeat with w in windows
+                repeat with t in tabs of w
+                    set output to output & (URL of t) & linefeed
+                end repeat
+            end repeat
+            return output
+        end tell
+        """
+    }
+
+    private static func chromeFrontTabScript(for app: String) -> String {
         """
         tell application "\(app)"
             if (count of windows) is 0 then return ""
@@ -123,27 +179,49 @@ final class BrowserURLWatcher {
         for target in Self.targets
         where running.contains(target.bundleID) && !inFlight.contains(target.bundleID) {
             inFlight.insert(target.bundleID)
-            // The Task inherits MainActor isolation; the heavy lifting
-            // (Process subprocess) is hopped off via `Task.detached`
-            // inside `runOsascriptOffMain`. We stay on main only to
-            // mutate `inFlight` / `lastURL` and to await the result.
-            Task { [weak self] in
-                let result = await Self.runOsascriptOffMain(target: target)
-                self?.handle(result: result, target: target)
+            if enumerated.contains(target.bundleID) {
+                Task { [weak self] in
+                    let result = await Self.runFrontTabOffMain(target: target)
+                    self?.handlePoll(result: result, target: target)
+                }
+            } else {
+                Task { [weak self] in
+                    let urls = await Self.runEnumerateOffMain(target: target)
+                    self?.handleEnumerate(urls: urls, target: target)
+                }
             }
         }
     }
 
+    /// Snapshot every URL the browser currently has open. Treated as
+    /// "already seen" so they won't be captured by subsequent polls.
+    /// On AppleScript failure (TCC denied, browser hung) we still mark
+    /// the bundle as enumerated so the next tick falls through to
+    /// polling — losing the snapshot only means the front tab gets
+    /// captured once, not repeatedly.
+    private func handleEnumerate(urls: [String]?, target: Target) {
+        inFlight.remove(target.bundleID)
+        enumerated.insert(target.bundleID)
+        let valid = (urls ?? []).filter { $0.hasPrefix("http://") || $0.hasPrefix("https://") }
+        seenURLs[target.bundleID] = Set(valid)
+        NSLog("[Meeting/Browser] enumerated %@: %d pre-existing URLs",
+              target.displayName, valid.count)
+    }
+
     /// Apply a poll result on the main actor: remove the in-flight
-    /// flag, dedupe against the last URL, and forward to the collector.
-    private func handle(result: ScriptResult?, target: Target) {
+    /// flag, skip if the URL was already seen (snapshot or earlier
+    /// capture), otherwise add it to seen and push to the collector.
+    private func handlePoll(result: ScriptResult?, target: Target) {
         inFlight.remove(target.bundleID)
         guard let result, !result.url.isEmpty else { return }
         // Drop chrome://, about:, file://, etc. — only http/https
         // are useful in a meeting summary.
         guard result.url.hasPrefix("http://") || result.url.hasPrefix("https://") else { return }
-        guard lastURL[target.bundleID] != result.url else { return }
-        lastURL[target.bundleID] = result.url
+
+        var seen = seenURLs[target.bundleID] ?? []
+        guard !seen.contains(result.url) else { return }
+        seen.insert(result.url)
+        seenURLs[target.bundleID] = seen
 
         let url = result.url
         let title = result.title
@@ -165,24 +243,53 @@ final class BrowserURLWatcher {
         let title: String?
     }
 
-    /// Detaches the synchronous `osascript` subprocess off the main
-    /// actor so a hung browser can't lock the UI. The static helper
-    /// captures only `target` (Sendable) — no `self` — so strict
-    /// concurrency stays happy.
-    nonisolated private static func runOsascriptOffMain(target: Target) async -> ScriptResult? {
+    /// Detaches the synchronous front-tab `osascript` subprocess off
+    /// the main actor so a hung browser can't lock the UI. The static
+    /// helper captures only `target` (Sendable) — no `self` — so
+    /// strict concurrency stays happy.
+    nonisolated private static func runFrontTabOffMain(target: Target) async -> ScriptResult? {
         await Task.detached(priority: .background) {
-            runOsascript(target: target)
+            runFrontTab(target: target)
         }.value
     }
 
-    /// Spawn `osascript -e <script>` with a 3 s wall-clock timeout. The
+    /// Detaches the synchronous enumeration subprocess off the main
+    /// actor. Same Sendable rules as the front-tab version.
+    nonisolated private static func runEnumerateOffMain(target: Target) async -> [String]? {
+        await Task.detached(priority: .background) {
+            runEnumerate(target: target)
+        }.value
+    }
+
+    nonisolated static let scriptTimeoutSeconds: Double = 5
+
+    nonisolated private static func runFrontTab(target: Target) -> ScriptResult? {
+        guard let raw = runScript(target: target, source: target.frontTabScript) else { return nil }
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard let url = lines.first, !url.isEmpty else { return nil }
+        let title = lines.count > 1 && !lines[1].isEmpty ? lines[1] : nil
+        return ScriptResult(url: url, title: title)
+    }
+
+    nonisolated private static func runEnumerate(target: Target) -> [String]? {
+        guard let raw = runScript(target: target, source: target.enumerateScript) else { return nil }
+        return raw.split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Spawn `osascript -e <script>` with a wall-clock timeout. The
     /// timeout exists so a hung browser can't leak subprocesses; we'd
     /// rather miss one URL than accumulate zombie processes for the
-    /// duration of the meeting.
-    nonisolated private static func runOsascript(target: Target) -> ScriptResult? {
+    /// duration of the meeting. Enumeration gets the same budget as
+    /// front-tab polls — listing every tab is still O(tabs) AppleScript
+    /// dispatches inside the target, which finishes well under 5 s
+    /// even on power users with hundreds of tabs.
+    nonisolated private static func runScript(target: Target, source: String) -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        proc.arguments = ["-e", target.script]
+        proc.arguments = ["-e", source]
         let stdout = Pipe()
         let stderr = Pipe()
         proc.standardOutput = stdout
@@ -195,14 +302,11 @@ final class BrowserURLWatcher {
             return nil
         }
 
-        // Best-effort timeout. DispatchWorkItem runs after 3 s and SIGTERMs
-        // the subprocess if it's still alive. Since waitUntilExit returns
-        // as soon as the process dies (terminated or otherwise), this
-        // doesn't add latency to fast-responding browsers.
         let killer = DispatchWorkItem {
             if proc.isRunning { proc.terminate() }
         }
-        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 3, execute: killer)
+        DispatchQueue.global(qos: .background)
+            .asyncAfter(deadline: .now() + scriptTimeoutSeconds, execute: killer)
         proc.waitUntilExit()
         killer.cancel()
 
@@ -219,11 +323,6 @@ final class BrowserURLWatcher {
         }
 
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        let raw = String(data: data, encoding: .utf8) ?? ""
-        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard let url = lines.first, !url.isEmpty else { return nil }
-        let title = lines.count > 1 && !lines[1].isEmpty ? lines[1] : nil
-        return ScriptResult(url: url, title: title)
+        return String(data: data, encoding: .utf8)
     }
 }

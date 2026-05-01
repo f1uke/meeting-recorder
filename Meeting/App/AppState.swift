@@ -41,6 +41,12 @@ final class AppState: ObservableObject {
     /// surfaced error inline without juggling local state.
     @Published private(set) var summaryGeneration: [MeetingRecord.ID: SummaryGenerationState] = [:]
 
+    /// Per-meeting Markdown-note generation status. Same shape as
+    /// `summaryGeneration` but tracks the "Note" toolbar action — the
+    /// Library detail's Note button reads this to disable / show a
+    /// spinner / surface an error inline.
+    @Published private(set) var noteGeneration: [MeetingRecord.ID: NoteGenerationState] = [:]
+
     init() {
         self.recording = RecordingSession()
         let library = MeetingsLibrary()
@@ -214,7 +220,8 @@ final class AppState: ObservableObject {
                 transcript: merged,
                 speakerProfiles: meeting.speakerProfiles,
                 calendarEvent: meeting.calendarEvent,
-                contextItems: meeting.contextItems
+                contextItems: meeting.contextItems,
+                meetingFolder: meeting.folder
             )
             let summary = try await llm.generateSummary(context: context)
             try summary.write(to: meeting.folder)
@@ -224,11 +231,133 @@ final class AppState: ObservableObject {
             summaryGeneration[meeting.id] = .failed(error.localizedDescription)
         }
     }
+
+    /// Generate a Markdown meeting note for the user's vault. Pipes
+    /// the transcript + metadata + captured items through Claude, then
+    /// writes the result to
+    /// `<meetingNotesFolder>/<yyyy-MM-dd>-<title-slug>.md`. Existing
+    /// files are overwritten; the caller is expected to confirm with
+    /// the user first when one already exists. Surfaces a toast with
+    /// "Reveal in Finder" on success.
+    func generateMeetingNote(for meeting: MeetingRecord) async {
+        noteGeneration[meeting.id] = .running
+        do {
+            let merged = try MergedTranscript.read(from: meeting.folder)
+            let context = MeetingLLMContext(
+                transcript: merged,
+                speakerProfiles: meeting.speakerProfiles,
+                calendarEvent: meeting.calendarEvent,
+                contextItems: meeting.contextItems,
+                meetingFolder: meeting.folder
+            )
+            let markdown = try await llm.generateMeetingNote(context: context)
+            let destinationURL = try Self.writeMeetingNote(
+                markdown: markdown,
+                meeting: meeting,
+                folderPath: AppPreferences.shared.meetingNotesFolder
+            )
+            noteGeneration[meeting.id] = .done(destinationURL)
+            toast.showMeetingNoteSaved(
+                meetingTitle: meeting.title,
+                fileURL: destinationURL
+            )
+        } catch {
+            noteGeneration[meeting.id] = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Returns the destination URL the note will land at, given a
+    /// meeting and the current preferences. Lets the UI check for an
+    /// existing file before triggering generation so the regenerate
+    /// confirmation is accurate.
+    func meetingNoteURL(for meeting: MeetingRecord) -> URL {
+        Self.meetingNoteURL(
+            for: meeting,
+            folderPath: AppPreferences.shared.meetingNotesFolder
+        )
+    }
+
+    private static func meetingNoteURL(
+        for meeting: MeetingRecord,
+        folderPath: String
+    ) -> URL {
+        let folder = URL(fileURLWithPath: folderPath, isDirectory: true)
+        let filename = meetingNoteFilename(for: meeting)
+        return folder.appendingPathComponent(filename)
+    }
+
+    private static func meetingNoteFilename(for meeting: MeetingRecord) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        let datePart = f.string(from: meeting.recordedAt)
+        let slug = slugify(meeting.title)
+        return "\(datePart)-\(slug).md"
+    }
+
+    /// Lowercase + dash-replace + strip punctuation. Keeps Thai (and
+    /// other non-Latin) characters as-is so titles like "ประชุมทีม"
+    /// still produce a meaningful slug. Falls back to a uuid suffix
+    /// when the result is empty (e.g. punctuation-only title).
+    private static func slugify(_ title: String) -> String {
+        let lowered = title.lowercased()
+        var out = ""
+        var lastWasDash = false
+        for scalar in lowered.unicodeScalars {
+            // Latin alphanumerics, digits, dashes, underscore stay as-is.
+            // Whitespace + most punctuation becomes a single dash.
+            // Non-Latin letters / numbers stay (Thai, CJK, etc.).
+            if (scalar >= "a" && scalar <= "z") ||
+               (scalar >= "0" && scalar <= "9") ||
+               scalar == "-" || scalar == "_" {
+                out.unicodeScalars.append(scalar)
+                lastWasDash = false
+            } else if CharacterSet.letters.contains(scalar) ||
+                      CharacterSet.decimalDigits.contains(scalar) {
+                out.unicodeScalars.append(scalar)
+                lastWasDash = false
+            } else if scalar == " " || CharacterSet.whitespaces.contains(scalar) ||
+                      CharacterSet.punctuationCharacters.contains(scalar) {
+                if !lastWasDash {
+                    out.append("-")
+                    lastWasDash = true
+                }
+            }
+            // Anything else (control chars, symbols) is dropped.
+        }
+        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        if trimmed.isEmpty {
+            return "untitled-\(UUID().uuidString.prefix(8).lowercased())"
+        }
+        return trimmed
+    }
+
+    private static func writeMeetingNote(
+        markdown: String,
+        meeting: MeetingRecord,
+        folderPath: String
+    ) throws -> URL {
+        let folder = URL(fileURLWithPath: folderPath, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true
+        )
+        let url = meetingNoteURL(for: meeting, folderPath: folderPath)
+        try markdown.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
 }
 
 enum SummaryGenerationState: Equatable {
     case running
     case done(Summary)
+    case failed(String)
+}
+
+enum NoteGenerationState: Equatable {
+    case running
+    /// The URL the Markdown file was written to in the user's vault.
+    case done(URL)
     case failed(String)
 }
 

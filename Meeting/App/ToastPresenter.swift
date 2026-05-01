@@ -36,6 +36,29 @@ final class ToastPresenter: ObservableObject {
         scheduleAutoDismiss(after: 8)
     }
 
+    /// Animate in a "Meeting note saved" toast — used by the Note
+    /// generator after writing a Markdown file to the user's vault.
+    /// Open reveals the .md in Finder so the user can pop into Obsidian
+    /// (or any editor) without hunting through the vault folder.
+    func showMeetingNoteSaved(meetingTitle: String, fileURL: URL) {
+        let info = ToastInfo(
+            headline: "Meeting note saved",
+            title: meetingTitle,
+            subtitle: fileURL.lastPathComponent,
+            openTarget: fileURL,
+            folder: fileURL.deletingLastPathComponent()
+        )
+        present(view: ToastView(
+            info: info,
+            onOpen: { [weak self] in
+                NSWorkspace.shared.activateFileViewerSelecting([info.openTarget])
+                self?.dismiss()
+            },
+            onDismiss: { [weak self] in self?.dismiss() }
+        ))
+        scheduleAutoDismiss(after: 6)
+    }
+
     /// Animate in a "Recording saved" toast — used by Stop only when the
     /// user wants to skip transcription and head straight to the next
     /// meeting. Open button reveals the meeting folder in Finder so they
