@@ -50,6 +50,9 @@ final class RecordingSession: ObservableObject {
     private var micGate: MicGate?
     private var micGateCancellable: AnyCancellable?
     private var meetParticipants: MeetParticipantsCollector?
+    private var clipboardWatcher: ClipboardWatcher?
+    private var browserWatcher: BrowserURLWatcher?
+    private var contextCollector: ContextCollector?
     private var currentFolder: URL?
 
     var isRecording: Bool {
@@ -224,6 +227,21 @@ final class RecordingSession: ObservableObject {
             NSLog("[Meeting/Session] start: step 5 done — MeetParticipantsCollector active")
         }
 
+        // Step 6: clipboard + browser-URL watchers. Both push into a
+        // shared ContextCollector so the meeting picks up text/links/
+        // images the user copies and pages they navigate to during the
+        // call — folded into the LLM summary later. Failure here is
+        // non-fatal; recording proceeds without context capture.
+        let collector = ContextCollector(recordingStart: recordingStart)
+        self.contextCollector = collector
+        let cw = ClipboardWatcher(collector: collector, meetingFolder: folder)
+        cw.start()
+        self.clipboardWatcher = cw
+        let bw = BrowserURLWatcher(collector: collector)
+        bw.start()
+        self.browserWatcher = bw
+        NSLog("[Meeting/Session] start: step 6 done — context watchers active")
+
         cancelStartWatchdog()
         NSLog("[Meeting/Session] start: ALL READY — state=recording")
     }
@@ -240,6 +258,11 @@ final class RecordingSession: ObservableObject {
         micGateState = nil
         meetParticipants?.stop()
         meetParticipants = nil
+        clipboardWatcher?.stop()
+        clipboardWatcher = nil
+        browserWatcher?.stop()
+        browserWatcher = nil
+        contextCollector = nil
         micRecorder?.stop()
         micRecorder = nil
         processAudioTap?.stop()
@@ -310,6 +333,23 @@ final class RecordingSession: ObservableObject {
         let participantNames = meetParticipants?.allParticipants ?? []
         meetParticipants = nil
 
+        // Stop context watchers (clipboard / browser-URL polls) and
+        // capture the final set of items. Reading the collector requires
+        // an actor hop — we do it before tearing down the audio pipeline
+        // so the items can be persisted alongside the meeting's other
+        // sidecar JSONs below.
+        clipboardWatcher?.stop()
+        clipboardWatcher = nil
+        browserWatcher?.stop()
+        browserWatcher = nil
+        let capturedContext: [ContextItem]
+        if let collector = contextCollector {
+            capturedContext = await collector.snapshot()
+        } else {
+            capturedContext = []
+        }
+        contextCollector = nil
+
         // Stop audio sources next so each m4a's moov atom is finalized
         // before we tear down the recording session.
         micRecorder?.stop()
@@ -364,6 +404,22 @@ final class RecordingSession: ObservableObject {
                     try CalendarEventFile(event: event).write(to: folder)
                 } catch {
                     NSLog("[Meeting/Session] calendar.json write failed: %@",
+                          String(describing: error))
+                }
+            }
+
+            // context.json — clipboard + browser-URL items captured
+            // during the session. Skip the disk hit when nothing was
+            // captured; absence of the file is the canonical "no
+            // context" signal that the Library / Transcript views
+            // already check for.
+            if !capturedContext.isEmpty {
+                do {
+                    try ContextCaptureFile(items: capturedContext).write(to: folder)
+                    NSLog("[Meeting/Session] context.json written: %d items",
+                          capturedContext.count)
+                } catch {
+                    NSLog("[Meeting/Session] context.json write failed: %@",
                           String(describing: error))
                 }
             }

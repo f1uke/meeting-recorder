@@ -124,6 +124,32 @@ final class MeetingsLibrary: ObservableObject {
         rescan()
     }
 
+    /// Drop a context item from `<meeting>/context.json` and rescan.
+    /// Also deletes the backing image file when the removed item is an
+    /// image so we don't accumulate orphans on disk. Used by the
+    /// Transcript Viewer's per-item delete affordance — the user
+    /// curates which copied items get folded into the AI summary.
+    func deleteContextItem(meeting id: MeetingRecord.ID, itemID: ContextItem.ID) {
+        guard let meeting = meetings.first(where: { $0.id == id }) else { return }
+        let remaining = meeting.contextItems.filter { $0.id != itemID }
+        guard remaining.count != meeting.contextItems.count else { return }
+
+        if let removed = meeting.contextItems.first(where: { $0.id == itemID }),
+           removed.kind == .image, let filename = removed.imageFilename {
+            let imageURL = ContextCaptureFile.imagesFolder(in: meeting.folder)
+                .appendingPathComponent(filename)
+            try? FileManager.default.removeItem(at: imageURL)
+        }
+
+        do {
+            try ContextCaptureFile(items: remaining).write(to: meeting.folder)
+        } catch {
+            NSLog("[Meeting/Library] context.json rewrite failed: %@",
+                  String(describing: error))
+        }
+        rescan()
+    }
+
     /// Searched meetings used by the list column.
     var visibleMeetings: [MeetingRecord] {
         let trimmed = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -212,6 +238,11 @@ final class MeetingsLibrary: ObservableObject {
         // couldn't enumerate (group invites, late joiners, etc.).
         let meetParticipants = MeetParticipantsFile.read(from: folder)?.participants ?? []
 
+        // Clipboard + browser context captured during recording. Sorted
+        // chronologically so the UI can render them in capture order.
+        let contextItems = (ContextCaptureFile.read(from: folder)?.items ?? [])
+            .sorted { $0.offset < $1.offset }
+
         // Title precedence: explicit user override > calendar event title
         // > formatted folder timestamp.
         let derivedTitle = calendarEvent?.title ?? folderTitle(folderName: folderName, date: date)
@@ -232,7 +263,8 @@ final class MeetingsLibrary: ObservableObject {
             hasTranscript: hasTranscript,
             summary: summary,
             calendarEvent: calendarEvent,
-            meetParticipants: meetParticipants
+            meetParticipants: meetParticipants,
+            contextItems: contextItems
         )
     }
 

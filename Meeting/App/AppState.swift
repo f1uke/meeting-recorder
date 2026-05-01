@@ -213,7 +213,8 @@ final class AppState: ObservableObject {
             let context = MeetingLLMContext(
                 transcript: merged,
                 speakerProfiles: meeting.speakerProfiles,
-                calendarEvent: meeting.calendarEvent
+                calendarEvent: meeting.calendarEvent,
+                contextItems: meeting.contextItems
             )
             let summary = try await llm.generateSummary(context: context)
             try summary.write(to: meeting.folder)

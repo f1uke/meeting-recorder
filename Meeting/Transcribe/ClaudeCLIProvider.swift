@@ -135,10 +135,11 @@ actor ClaudeCLIProvider: LLMProvider {
 
         let metaSection = buildMetaSection(context: context)
         let rosterSection = buildRosterSection(context: context)
+        let contextSection = buildContextSection(context: context)
 
         return """
         You are extracting structured insights from a meeting transcript.
-        \(metaSection)\(rosterSection)
+        \(metaSection)\(rosterSection)\(contextSection)
         Read the transcript and respond with ONLY a JSON object — no prose,\
          no markdown fences, no explanation. The shape must be:
 
@@ -189,6 +190,44 @@ actor ClaudeCLIProvider: LLMProvider {
     /// attribute commitments to a real person, weight chair speech
     /// differently when extracting decisions, and use full names in
     /// the summary instead of bare nicknames.
+    /// Captured-context section — feeds Claude the clipboard text /
+    /// browser URLs / image filenames the user picked up during the
+    /// meeting so the summary can quote a pasted snippet, follow up on
+    /// "as mentioned in <link>", or attribute decisions to material
+    /// outside the audio. Each item is timestamped against the
+    /// recording so the model can correlate it with the transcript.
+    /// Omitted entirely when there are no items.
+    private static func buildContextSection(context: MeetingLLMContext) -> String {
+        guard !context.contextItems.isEmpty else { return "" }
+        var lines: [String] = ["Captured during the meeting (clipboard + visited links):"]
+        for item in context.contextItems {
+            let stamp = formatTimestamp(item.offset)
+            switch item.kind {
+            case .text:
+                let snippet = (item.text ?? "")
+                    .replacingOccurrences(of: "\n", with: " ")
+                let trimmed = snippet.count > 240
+                    ? String(snippet.prefix(240)) + "…"
+                    : snippet
+                lines.append("- [\(stamp)] copied text: \"\(trimmed)\"")
+            case .url:
+                let label: String = {
+                    if item.source == .browser {
+                        if let title = item.pageTitle, !title.isEmpty {
+                            return "visited \"\(title)\""
+                        }
+                        return "visited"
+                    }
+                    return "copied link"
+                }()
+                lines.append("- [\(stamp)] \(label): \(item.text ?? "")")
+            case .image:
+                lines.append("- [\(stamp)] copied image (\(item.imageFilename ?? "image"))")
+            }
+        }
+        return "\n\n" + lines.joined(separator: "\n")
+    }
+
     private static func buildRosterSection(context: MeetingLLMContext) -> String {
         guard !context.speakerProfiles.isEmpty else { return "" }
         var lines: [String] = ["Speakers (transcript label → identity):"]

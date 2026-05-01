@@ -356,6 +356,9 @@ private struct TranscriptLeftColumn: View {
                         playerModel: playerModel
                     )
                     AttendeesPanel(meeting: meeting)
+                    if !meeting.contextItems.isEmpty {
+                        ContextPanel(meeting: meeting)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 4)
@@ -1005,6 +1008,53 @@ private struct AttendeePill: View {
     private var avatarColor: Color {
         let palette: [Color] = [.tagEngineering, .tagDesign, .tagPeople, .tagResearch, .tagOneOnOne]
         return palette[abs(attendee.id.hashValue) % palette.count]
+    }
+}
+
+// =============================================================================
+// MARK: - Context items panel (delete-enabled)
+// =============================================================================
+
+/// Left-column card listing every clipboard / browser-URL item captured
+/// during the meeting, with a per-item trash button. Deletes rewrite
+/// `<meeting>/context.json` (and remove the underlying image file when
+/// applicable) before kicking off a Library rescan, so the next AI
+/// summary run sees the curated list rather than every random copy.
+private struct ContextPanel: View {
+    let meeting: MeetingRecord
+    @EnvironmentObject private var library: MeetingsLibrary
+    @AppStorage("transcript.viewer.expand.context") private var isExpanded: Bool = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            CollapsibleHeader(
+                label: "Captured · \(meeting.contextItems.count)",
+                isExpanded: $isExpanded
+            ) {
+                EmptyView()
+            }
+
+            if isExpanded {
+                VStack(spacing: 4) {
+                    ForEach(meeting.contextItems) { item in
+                        ContextItemRow(
+                            item: item,
+                            meetingFolder: meeting.folder,
+                            onDelete: {
+                                library.deleteContextItem(
+                                    meeting: meeting.id,
+                                    itemID: item.id
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background {
+            GlassCard(radius: 12) { Color.clear }
+        }
     }
 }
 

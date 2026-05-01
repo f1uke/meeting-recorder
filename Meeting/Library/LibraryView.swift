@@ -337,6 +337,9 @@ private struct LibraryDetail: View {
                             }
                             AISummarySection(meeting: meeting)
                             ActionItemsSection(meeting: meeting)
+                            if !meeting.contextItems.isEmpty {
+                                ContextItemsSection(meeting: meeting)
+                            }
                             if !meeting.speakers.isEmpty {
                                 SpeakersStrip(meeting: meeting)
                             }
@@ -852,6 +855,193 @@ private struct ActionItemRow: View {
                 .fill(.regularMaterial)
         }
         .glassBorder(cornerRadius: 9)
+    }
+}
+
+// =============================================================================
+// MARK: - Context items (clipboard + browser-URL captures)
+// =============================================================================
+
+/// Read-only card on the Library detail surfacing what the user copied
+/// and which links they opened during the meeting. The Transcript Viewer
+/// adds the per-item delete affordance — this view is just for context
+/// at-a-glance while scanning the meeting list.
+struct ContextItemsSection: View {
+    let meeting: MeetingRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.textDim)
+                SectionLabel(text: "Captured · \(meeting.contextItems.count)")
+                Spacer()
+                Text("Edit in Transcript")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.textFaint)
+            }
+            VStack(spacing: 4) {
+                ForEach(meeting.contextItems) { item in
+                    ContextItemRow(item: item, meetingFolder: meeting.folder)
+                }
+            }
+        }
+    }
+}
+
+/// One row in the context list. Used by both the Library detail (read-
+/// only) and the Transcript Viewer (with delete). `onDelete == nil`
+/// hides the trailing trash button.
+struct ContextItemRow: View {
+    let item: ContextItem
+    let meetingFolder: URL
+    var onDelete: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 10) {
+            iconView
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                if let title = primaryLine {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(2)
+                }
+                if let secondary = secondaryLine {
+                    Text(secondary)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Color.textFaint)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 6)
+            Text(formatOffset(item.offset))
+                .font(.system(size: 10, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(Color.textFaint)
+            if let onDelete {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textDim)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Remove from context")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background {
+            RoundedRectangle(cornerRadius: 9)
+                .fill(.regularMaterial)
+        }
+        .glassBorder(cornerRadius: 9)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            // Double-click opens the URL or reveals the image in Finder
+            // — gives the user a way to inspect a row without leaving
+            // the Library/Transcript view.
+            handleOpen()
+        }
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        switch item.kind {
+        case .text:
+            Image(systemName: "text.alignleft")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.textDim)
+        case .url:
+            Image(systemName: item.source == .browser ? "safari" : "link")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.brandAccent)
+        case .image:
+            if let thumb = thumbnail() {
+                Image(nsImage: thumb)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 18, height: 18)
+                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.textDim)
+            }
+        }
+    }
+
+    private var primaryLine: String? {
+        switch item.kind {
+        case .text:
+            return item.text?.replacingOccurrences(of: "\n", with: " ")
+        case .url:
+            return item.pageTitle ?? item.text
+        case .image:
+            return "Image"
+        }
+    }
+
+    private var secondaryLine: String? {
+        switch item.kind {
+        case .text:
+            switch item.source {
+            case .clipboard: return "Clipboard"
+            case .browser: return nil
+            }
+        case .url:
+            // For a browser visit, primary line is the page title and
+            // secondary is the URL itself. For a clipboard URL, primary
+            // is the URL and we don't need a secondary.
+            if item.pageTitle != nil { return item.text }
+            return item.browserName ?? "Clipboard"
+        case .image:
+            return item.imageFilename
+        }
+    }
+
+    private func thumbnail() -> NSImage? {
+        guard item.kind == .image, let filename = item.imageFilename else { return nil }
+        let url = ContextCaptureFile.imagesFolder(in: meetingFolder)
+            .appendingPathComponent(filename)
+        return NSImage(contentsOf: url)
+    }
+
+    private func handleOpen() {
+        switch item.kind {
+        case .url:
+            if let str = item.text, let url = URL(string: str) {
+                NSWorkspace.shared.open(url)
+            }
+        case .image:
+            if let filename = item.imageFilename {
+                let url = ContextCaptureFile.imagesFolder(in: meetingFolder)
+                    .appendingPathComponent(filename)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        case .text:
+            // Plain text — copy back to clipboard for the user's
+            // convenience. No side effect on disk.
+            if let text = item.text {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
+    }
+
+    private func formatOffset(_ t: TimeInterval) -> String {
+        let total = Int(t)
+        let h = total / 3600
+        let m = (total / 60) % 60
+        let s = total % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%d:%02d", m, s)
     }
 }
 

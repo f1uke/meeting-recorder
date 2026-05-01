@@ -61,6 +61,13 @@ struct MeetingRecord: Identifiable, Equatable, Hashable, Sendable {
     /// Accessibility permission was denied.
     let meetParticipants: [String]
 
+    /// Clipboard text/links/images and browser-URL navigations captured
+    /// during the recording, loaded from `<folder>/context.json`. The
+    /// Library detail surfaces them read-only; the Transcript Viewer
+    /// adds per-item delete so the user can prune unrelated copies
+    /// before the next AI summary run picks them up.
+    let contextItems: [ContextItem]
+
     var id: String { folder.lastPathComponent }
 }
 

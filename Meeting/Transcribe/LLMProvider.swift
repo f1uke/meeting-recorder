@@ -57,11 +57,14 @@ protocol LLMProvider: Sendable {
 /// Bundle handed to `LLMProvider.generateSummary`. Beyond the bare
 /// transcript, providers get the speaker→attendee mapping (so action
 /// items can reference real participants) and the calendar event
-/// (title + attendees give the model meeting purpose).
+/// (title + attendees give the model meeting purpose). `contextItems`
+/// carries clipboard + browser-URL captures so the model can pull
+/// links / quoted text into the summary.
 struct MeetingLLMContext: Sendable {
     let transcript: MergedTranscript
     let speakerProfiles: [SpeakerProfile]
     let calendarEvent: CalendarEvent?
+    let contextItems: [ContextItem]
 }
 
 enum LLMAvailability: Sendable, Equatable {

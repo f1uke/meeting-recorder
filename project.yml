@@ -48,6 +48,7 @@ targets:
         NSDocumentsFolderUsageDescription: "Meeting saves recordings and transcripts to ~/Documents/Meetings/."
         NSCalendarsFullAccessUsageDescription: "Meeting reads calendar events so it can pre-fill meeting titles, attendees, and remind you when a scheduled meeting is about to start. Calendar data stays on your Mac — it is never uploaded."
         NSCalendarsUsageDescription: "Meeting reads calendar events to pre-fill meeting titles and attendees. Calendar data stays on your Mac."
+        NSAppleEventsUsageDescription: "Meeting reads the front-tab URL of your browser during a recording so links you visit can be folded into the meeting summary. Browser data stays on your Mac unless you generate the AI summary."
     entitlements:
       path: Meeting/Resources/Meeting.entitlements
       properties:
@@ -61,6 +62,12 @@ targets:
         # Calendars. The entitlement was originally a sandbox key but
         # tccd consults it on hardened binaries too.
         com.apple.security.personal-information.calendars: true
+        # Required so NSAppleScript can drive Safari / Chrome / Arc /
+        # Edge / Brave for the BrowserURLWatcher. macOS surfaces a
+        # per-target "Meeting wants to control <browser>" dialog the
+        # first time we hit each one; without this entitlement the
+        # AppleScript fails with errAEEventNotPermitted (-1743).
+        com.apple.security.automation.apple-events: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.fluke.meeting
