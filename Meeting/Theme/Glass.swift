@@ -120,7 +120,7 @@ private struct GlassBorderModifier: ViewModifier {
 // MARK: - GlassPill — capsule background style
 
 /// Capsule glass pill used as the background for row chips and small status
-/// badges (e.g. "RECORDING" pill, mark count chip, "+ Mark" link).
+/// badges (e.g. "RECORDING" pill, status indicators).
 struct GlassPill: View {
     var tint: Color? = nil
     @Environment(\.colorScheme) private var scheme

@@ -7,16 +7,15 @@ import os
 /// appear in the Library list within ~one tick of finishing transcription.
 ///
 /// The Meetings folder is the canonical source of truth — `transcript.json`
-/// gives speakers + duration, `marks.json` gives moment timestamps, the
-/// folder name gives the recording date. Per-meeting user metadata
-/// (title, tags, starred, custom speaker names) layers on top via
-/// `library.json` at `~/Library/Application Support/dev.fluke.meeting/`.
+/// gives speakers + duration, the folder name gives the recording date.
+/// Per-meeting user metadata (title, tags, starred, custom speaker names)
+/// layers on top via `library.json` at
+/// `~/Library/Application Support/dev.fluke.meeting/`.
 @MainActor
 final class MeetingsLibrary: ObservableObject {
     @Published private(set) var meetings: [MeetingRecord] = []
     @Published var selection: MeetingRecord.ID?
     @Published var search: String = ""
-    @Published var sidebarFilter: SidebarFilter = .all
 
     private let meetingsRoot: URL
     private let libraryFileURL: URL
@@ -125,18 +124,11 @@ final class MeetingsLibrary: ObservableObject {
         rescan()
     }
 
-    /// Filtered + searched meetings used by the list column.
+    /// Searched meetings used by the list column.
     var visibleMeetings: [MeetingRecord] {
-        let bySidebar: [MeetingRecord]
-        switch sidebarFilter {
-        case .all: bySidebar = meetings
-        case .starred: bySidebar = meetings.filter { $0.starred }
-        case .marked: bySidebar = meetings.filter { !$0.marks.isEmpty }
-        case .tag(let tag): bySidebar = meetings.filter { $0.tags.contains(tag) }
-        }
         let trimmed = search.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !trimmed.isEmpty else { return bySidebar }
-        return bySidebar.filter { $0.title.lowercased().contains(trimmed) }
+        guard !trimmed.isEmpty else { return meetings }
+        return meetings.filter { $0.title.lowercased().contains(trimmed) }
     }
 
     /// Three most recent meetings — drives the popover's RECENT section.
@@ -208,9 +200,6 @@ final class MeetingsLibrary: ObservableObject {
         }
         let speakers = speakerProfiles.map { $0.asSpeaker }
 
-        // Parse marks.json (optional — older meetings predate U4).
-        let marks = (try? MarksFile.read(from: folder).marks) ?? []
-
         // Load cached LLM summary if previously generated (U8b).
         let summary = try? Summary.read(from: folder)
 
@@ -240,7 +229,6 @@ final class MeetingsLibrary: ObservableObject {
             appName: nil,
             tags: override?.tags ?? [],
             starred: override?.starred ?? false,
-            marks: marks,
             hasTranscript: hasTranscript,
             summary: summary,
             calendarEvent: calendarEvent,
@@ -283,15 +271,6 @@ final class MeetingsLibrary: ObservableObject {
         source.resume()
         self.fileSource = source
     }
-}
-
-// MARK: - Filters
-
-enum SidebarFilter: Hashable, Sendable {
-    case all
-    case starred
-    case marked
-    case tag(String)
 }
 
 struct StorageUsage: Sendable {

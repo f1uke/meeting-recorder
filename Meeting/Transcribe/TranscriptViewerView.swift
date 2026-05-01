@@ -1,8 +1,9 @@
 import SwiftUI
 import AVKit
 
-/// 1180×760 transcript viewer with the design's three-column glass layout:
-/// nav rail · video + speakers + moments · scrollable diarized transcript.
+/// 1180×760 transcript viewer with the design's two-column glass layout:
+/// video + speakers · scrollable diarized transcript. Top toolbar carries
+/// the "Library > <title>" breadcrumb that goes back to the meeting list.
 ///
 /// The viewer hangs off `MeetingsLibrary.selectedMeeting` — opening the
 /// window with no selection shows an empty-state card. Picking a meeting
@@ -29,74 +30,15 @@ struct TranscriptViewerView: View {
             )
             .ignoresSafeArea()
 
-            HStack(spacing: 0) {
-                TranscriptNavRail()
-                if let meeting = library.selectedMeeting {
-                    TranscriptMainPane(meeting: meeting)
-                        // Force a fresh load when the user switches meeting.
-                        .id(meeting.id)
-                } else {
-                    EmptyTranscriptPlaceholder()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+            if let meeting = library.selectedMeeting {
+                TranscriptMainPane(meeting: meeting)
+                    .id(meeting.id)
+            } else {
+                EmptyTranscriptPlaceholder()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(minWidth: 1180, minHeight: 760)
-    }
-}
-
-// =============================================================================
-// MARK: - Nav rail
-// =============================================================================
-
-private struct TranscriptNavRail: View {
-    @EnvironmentObject private var appState: AppState
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        ZStack {
-            Color.clear
-                .background(.thickMaterial)
-                .overlay(GlassTint.sidebar.tintColor(for: scheme))
-
-            VStack(spacing: 6) {
-                // Header gives traffic lights room.
-                Color.clear.frame(height: 36)
-                NavRailButton(icon: "list.bullet") { appState.route = .library }
-                NavRailButton(icon: "magnifyingglass", active: true) {}
-                NavRailButton(icon: "sparkles") {}
-                NavRailButton(icon: "flag.fill") {}
-                NavRailButton(icon: "person.2.fill") {}
-                Spacer()
-                NavRailButton(icon: "record.circle.fill") {}
-                NavRailButton(icon: "gearshape") {}
-            }
-            .padding(.bottom, 12)
-        }
-        .frame(width: 56)
-    }
-}
-
-private struct NavRailButton: View {
-    let icon: String
-    var active: Bool = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(active ? Color.textPrimary : Color.textDim)
-                .frame(width: 36, height: 36)
-                .background {
-                    if active {
-                        RoundedRectangle(cornerRadius: 9)
-                            .fill(Color.primary.opacity(0.10))
-                    }
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -233,25 +175,36 @@ private struct TranscriptToolbar: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 5) {
-                Button(action: { appState.route = .library }) {
+        HStack(spacing: 10) {
+            Button(action: { appState.route = .library }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
                     Text("Library")
-                        .foregroundStyle(Color.textDim)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .contentShape(Rectangle())
+                        .font(.system(size: 12, weight: .medium))
                 }
-                .buttonStyle(.plain)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color.textFaint)
-                Text(meeting.title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.textPrimary)
-                    .lineLimit(1)
+                .foregroundStyle(Color.textPrimary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background {
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(.regularMaterial)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7)
+                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                        }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
-            .font(.system(size: 12))
+            .buttonStyle(.plain)
+            .keyboardShortcut("[", modifiers: .command)
+            .help("Back to Library (⌘[)")
+
+            Text(meeting.title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
             Spacer()
 
             HStack(spacing: 6) {
@@ -403,7 +356,6 @@ private struct TranscriptLeftColumn: View {
                         playerModel: playerModel
                     )
                     AttendeesPanel(meeting: meeting)
-                    MomentsPanel(meeting: meeting, playerModel: playerModel)
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 4)
@@ -1053,64 +1005,6 @@ private struct AttendeePill: View {
     private var avatarColor: Color {
         let palette: [Color] = [.tagEngineering, .tagDesign, .tagPeople, .tagResearch, .tagOneOnOne]
         return palette[abs(attendee.id.hashValue) % palette.count]
-    }
-}
-
-private struct MomentsPanel: View {
-    let meeting: MeetingRecord
-    @ObservedObject var playerModel: VideoPlayerModel
-    @AppStorage("transcript.viewer.expand.moments") private var isExpanded: Bool = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            CollapsibleHeader(label: "Moments · \(meeting.marks.count)", isExpanded: $isExpanded) {
-                EmptyView()
-            }
-            if isExpanded {
-                if meeting.marks.isEmpty {
-                    Text("Hit ⌘B during recording to mark moments here")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.textFaint)
-                        .padding(.vertical, 4)
-                } else {
-                    ForEach(meeting.marks) { mark in
-                        Button {
-                            playerModel.seek(to: mark.timestamp)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text(formatTimestamp(mark.timestamp))
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .monospacedDigit()
-                                    .foregroundStyle(Color.brandAccentStrong)
-                                    .frame(width: 50, alignment: .leading)
-                                Text(mark.note ?? "Marked moment")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(Color.textPrimary)
-                                    .lineLimit(1)
-                                Spacer()
-                            }
-                            .padding(.vertical, 3)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .background {
-            GlassCard(radius: 12) { Color.clear }
-        }
-    }
-
-    private func formatTimestamp(_ t: TimeInterval) -> String {
-        let total = Int(t)
-        let h = total / 3600
-        let m = (total / 60) % 60
-        let s = total % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%02d:%02d", m, s)
     }
 }
 

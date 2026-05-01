@@ -18,5 +18,24 @@ struct RootView: View {
             }
         }
         .frame(minWidth: 1180, minHeight: 760)
+        .sheet(isPresented: $appState.showSettings) {
+            SettingsSheet()
+                .appEnvironment(appState)
+        }
+    }
+}
+
+private struct SettingsSheet: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        SettingsView()
+            .frame(width: 820, height: 640)
+            .overlay(alignment: .topTrailing) {
+                Button("Done") { appState.showSettings = false }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .padding(.top, 12)
+                    .padding(.trailing, 16)
+            }
     }
 }

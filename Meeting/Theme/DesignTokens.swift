@@ -31,7 +31,7 @@ extension Color {
     /// Gradient end for the red Stop button.
     static let recordRedDeep = Color(red: 0.91, green: 0.29, blue: 0.26)      // #E94942
 
-    /// Marked moments, action item left border, "+ Mark" link.
+    /// Action item left border, error/warning accents.
     static let warmMark = Color(red: 0.94, green: 0.47, blue: 0.25)           // oklch(0.78 0.16 25)
 
     /// Granted state, "Transcript ready" toast.

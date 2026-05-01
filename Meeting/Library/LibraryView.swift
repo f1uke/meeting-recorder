@@ -1,19 +1,13 @@
 import SwiftUI
 
-/// Three-pane Library window. Sidebar (filters) · List (meetings) · Detail
-/// (metadata + speakers strip). The Summary card and Action-items list
-/// from the design proto are deferred to U8b once the LLM provider lands.
+/// Two-pane Library window. List (meetings) · Detail (metadata + speakers
+/// strip + AI summary + action items).
 struct LibraryView: View {
     @EnvironmentObject private var library: MeetingsLibrary
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 0) {
-            LibrarySidebar()
-                .frame(width: 220)
-
-            Divider().opacity(0.3)
-
             LibraryList()
                 .frame(width: 380)
 
@@ -22,7 +16,7 @@ struct LibraryView: View {
             LibraryDetail()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 1080, minHeight: 700)
+        .frame(minWidth: 860, minHeight: 700)
         .background {
             LinearGradient(
                 colors: [
@@ -40,187 +34,6 @@ struct LibraryView: View {
             .ignoresSafeArea()
         }
         .onAppear { library.rescan() }
-    }
-}
-
-// =============================================================================
-// MARK: - Sidebar
-// =============================================================================
-
-private struct LibrarySidebar: View {
-    @EnvironmentObject private var library: MeetingsLibrary
-    @Environment(\.colorScheme) private var scheme
-    @State private var storage = StorageUsage(usedBytes: 0, freeBytes: 0)
-
-    var body: some View {
-        ZStack {
-            Color.clear
-                .background(.thickMaterial)
-                .overlay(GlassTint.sidebar.tintColor(for: scheme))
-                .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                // Header gives traffic lights room.
-                Color.clear.frame(height: 44)
-
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        SidebarSectionGroup(label: "Library") {
-                            SidebarRow(
-                                icon: "clock",
-                                label: "All meetings",
-                                count: library.meetings.count,
-                                isSelected: library.sidebarFilter == .all
-                            ) { library.sidebarFilter = .all }
-
-                            SidebarRow(
-                                icon: "star.fill",
-                                label: "Starred",
-                                count: library.meetings.filter(\.starred).count,
-                                isSelected: library.sidebarFilter == .starred
-                            ) { library.sidebarFilter = .starred }
-
-                            SidebarRow(
-                                icon: "flag.fill",
-                                label: "Marked moments",
-                                count: library.meetings.reduce(0) { $0 + $1.marks.count },
-                                isSelected: library.sidebarFilter == .marked
-                            ) { library.sidebarFilter = .marked }
-                        }
-
-                        // Tags + Speakers groups appear once the user
-                        // accumulates them. U5 has no UI for tagging yet so
-                        // these stay empty; LibraryDetail's "Add tag" button
-                        // populates them in subsequent passes.
-                        let allTags = Set(library.meetings.flatMap(\.tags)).sorted()
-                        if !allTags.isEmpty {
-                            SidebarSectionGroup(label: "Tags") {
-                                ForEach(allTags, id: \.self) { tag in
-                                    SidebarRow(
-                                        dot: tagColor(for: tag),
-                                        label: tag,
-                                        count: library.meetings.filter { $0.tags.contains(tag) }.count,
-                                        isSelected: library.sidebarFilter == .tag(tag)
-                                    ) { library.sidebarFilter = .tag(tag) }
-                                }
-                            }
-                        }
-
-                        Spacer(minLength: 8)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
-                }
-
-                StorageFooter(usage: storage)
-                    .padding(12)
-                    .overlay(alignment: .top) {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.08))
-                            .frame(height: 0.5)
-                    }
-            }
-        }
-        .task { storage = library.storageUsage() }
-        .onChange(of: library.meetings.count) { storage = library.storageUsage() }
-    }
-
-    private func tagColor(for name: String) -> Color {
-        // Assign a stable color from the palette by hashing the tag name.
-        let palette: [Color] = [.tagEngineering, .tagDesign, .tagPeople, .tagResearch, .tagOneOnOne]
-        let idx = abs(name.hashValue) % palette.count
-        return palette[idx]
-    }
-}
-
-private struct SidebarSectionGroup<Content: View>: View {
-    let label: String
-    @ViewBuilder var content: () -> Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionLabel(text: label)
-                .padding(.leading, 10)
-                .padding(.bottom, 2)
-            content()
-        }
-    }
-}
-
-private struct SidebarRow: View {
-    var icon: String? = nil
-    var dot: Color? = nil
-    let label: String
-    let count: Int
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                if let icon {
-                    Image(systemName: icon)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.textDim)
-                        .frame(width: 16)
-                }
-                if let dot {
-                    Circle().fill(dot).frame(width: 9, height: 9)
-                        .frame(width: 16)
-                }
-                Text(label)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(Color.textPrimary)
-                Spacer(minLength: 4)
-                Text(String(count))
-                    .font(.system(size: 10).monospacedDigit())
-                    .foregroundStyle(Color.textFaint)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Color.primary.opacity(0.10))
-                }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct StorageFooter: View {
-    let usage: StorageUsage
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(text: "Storage")
-
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.10)).frame(height: 4)
-                GeometryReader { proxy in
-                    Capsule()
-                        .fill(LinearGradient(
-                            colors: [Color.brandAccent, Color.brandAccent.opacity(0.65)],
-                            startPoint: .leading, endPoint: .trailing
-                        ))
-                        .frame(width: proxy.size.width * usage.usedFraction, height: 4)
-                }
-                .frame(height: 4)
-            }
-            .frame(height: 4)
-
-            HStack {
-                Text("\(usage.usedFormatted) used")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.textDim)
-                Spacer()
-                Text("\(usage.freeFormatted) free")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.textFaint)
-            }
-        }
     }
 }
 
@@ -300,20 +113,17 @@ private struct LibraryList: View {
 
 private struct ListToolbar: View {
     @EnvironmentObject private var library: MeetingsLibrary
+    @EnvironmentObject private var appState: AppState
     @FocusState private var searchFocused: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(filterLabel)
-                    .font(.system(size: 15, weight: .bold))
-                    .tracking(-0.15)
-                    .foregroundStyle(Color.textPrimary)
-            }
-            Text(String(library.visibleMeetings.count))
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(Color.textDim)
-            Spacer()
+            Text("\(library.visibleMeetings.count) meeting\(library.visibleMeetings.count == 1 ? "" : "s")")
+                .font(.system(size: 20, weight: .bold).monospacedDigit())
+                .tracking(-0.3)
+                .foregroundStyle(Color.textPrimary)
+                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 12)
 
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -327,7 +137,7 @@ private struct ListToolbar: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .frame(width: 200)
+            .frame(maxWidth: 200)
             .background {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(.regularMaterial)
@@ -346,20 +156,21 @@ private struct ListToolbar: View {
                     .opacity(0)
                     .accessibilityHidden(true)
             }
+
+            Button(action: { appState.showSettings = true }) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.textDim)
+                    .frame(width: 28, height: 28)
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Settings (⌘,)")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
-        }
-    }
-
-    private var filterLabel: String {
-        switch library.sidebarFilter {
-        case .all: return "All meetings"
-        case .starred: return "Starred"
-        case .marked: return "Marked moments"
-        case .tag(let tag): return tag
         }
     }
 }
@@ -391,11 +202,6 @@ private struct MeetingRow: View {
                             .labelStyle(.titleAndIcon)
                         if meeting.speakerCount > 0 {
                             Label("\(meeting.speakerCount)", systemImage: "person.2.fill")
-                                .font(.system(size: 10.5))
-                                .labelStyle(.titleAndIcon)
-                        }
-                        if !meeting.marks.isEmpty {
-                            Label("\(meeting.marks.count)", systemImage: "flag.fill")
                                 .font(.system(size: 10.5))
                                 .labelStyle(.titleAndIcon)
                         }
@@ -533,9 +339,6 @@ private struct LibraryDetail: View {
                             ActionItemsSection(meeting: meeting)
                             if !meeting.speakers.isEmpty {
                                 SpeakersStrip(meeting: meeting)
-                            }
-                            if !meeting.marks.isEmpty {
-                                DetailMomentsList(meeting: meeting)
                             }
                         }
                         .padding(.horizontal, 28)
@@ -831,48 +634,6 @@ private struct SpeakerCard: View {
     private var avatarColor: Color {
         let palette: [Color] = [.tagEngineering, .tagDesign, .tagPeople, .tagResearch, .tagOneOnOne]
         return palette[abs(speaker.id.rawValue.hashValue) % palette.count]
-    }
-}
-
-private struct DetailMomentsList: View {
-    let meeting: MeetingRecord
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "Marked moments · \(meeting.marks.count)")
-            VStack(spacing: 4) {
-                ForEach(meeting.marks) { mark in
-                    HStack(spacing: 10) {
-                        Image(systemName: "flag.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Color.warmMark)
-                        Text(mark.note ?? "")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.textPrimary)
-                        Spacer()
-                        Text(formatTimestamp(mark.timestamp))
-                            .font(.mono(10))
-                            .foregroundStyle(Color.brandAccentStrong)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(.regularMaterial)
-                    }
-                }
-            }
-        }
-    }
-
-    private func formatTimestamp(_ t: TimeInterval) -> String {
-        let total = Int(t)
-        let h = total / 3600
-        let m = (total / 60) % 60
-        let s = total % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%02d:%02d", m, s)
     }
 }
 

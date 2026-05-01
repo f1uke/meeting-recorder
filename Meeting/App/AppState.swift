@@ -32,6 +32,10 @@ final class AppState: ObservableObject {
     /// nav-rail back button / breadcrumb.
     @Published var route: AppRoute = .library
 
+    /// Drives the Settings sheet on the main window. Toggled by the
+    /// gear button in toolbars and the ⌘, menu command.
+    @Published var showSettings: Bool = false
+
     /// Per-meeting summary generation status — keyed by MeetingRecord.id
     /// so Library detail and Transcript viewer can show a spinner /
     /// surfaced error inline without juggling local state.

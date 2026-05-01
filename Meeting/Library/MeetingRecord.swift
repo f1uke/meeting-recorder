@@ -1,7 +1,7 @@
 import Foundation
 
 /// One row in the Library — a meeting folder with parsed-from-disk metadata
-/// (folder name, transcript.json, marks.json) plus user-supplied overrides
+/// (folder name, transcript.json) plus user-supplied overrides
 /// from `library.json` (title, tags, starred flag, custom speaker names).
 ///
 /// `id` is the folder's last path component (e.g. "2026-04-29_14-30-15") so
@@ -39,7 +39,6 @@ struct MeetingRecord: Identifiable, Equatable, Hashable, Sendable {
 
     let tags: [String]
     let starred: Bool
-    let marks: [Mark]
 
     /// Whether this folder has a finished transcript on disk. Used to grey
     /// out detail-pane actions like "Open Transcript" or "Export".

@@ -26,9 +26,6 @@ final class RecordingSession: ObservableObject {
     /// persisted to `<folder>/calendar.json` on stop so the Library can
     /// surface attendees + organizer + conference URL.
     @Published private(set) var currentEvent: CalendarEvent?
-    /// User-flagged moments accumulated by ⌘B during the active recording.
-    /// Cleared on `start`, persisted to `marks.json` on `stop`.
-    @Published private(set) var marks: [Mark] = []
     /// Mic device label for the recording window's "You · mic" sub-label.
     @Published private(set) var micDeviceName: String?
     /// Number of audio process objects bridged by the output tap. Surfaced
@@ -68,7 +65,6 @@ final class RecordingSession: ObservableObject {
         }
         state = .starting
         errorMessage = nil
-        marks = []
         currentEvent = event
         micRMS.reset()
         outputRMS.reset()
@@ -296,14 +292,6 @@ final class RecordingSession: ObservableObject {
         state = .idle
     }
 
-    /// Append a mark at the current elapsed time. Triggered by ⌘B or the
-    /// "+ Mark" button. No-op if not recording.
-    func mark() {
-        guard case let .recording(_, started) = state else { return }
-        let elapsed = Date().timeIntervalSince(started)
-        marks.append(Mark(timestamp: elapsed))
-    }
-
     func stop() async {
         guard case .recording = state else { return }
         state = .stopping
@@ -337,17 +325,7 @@ final class RecordingSession: ObservableObject {
         }
         coordinator = nil
 
-        // Persist marks before the folder reference is cleared so the
-        // file lands beside the media. Always written (even if empty) so
-        // the upcoming MeetingsLibrary watcher has a known artifact.
         if let folder = currentFolder {
-            do {
-                try MarksFile(marks: marks).write(to: folder)
-            } catch {
-                NSLog("[Meeting/Session] marks.json write failed: %@",
-                      String(describing: error))
-            }
-
             // mic_gate.json — only written when the gate actually ran for
             // this session. Absence is the canonical "no gating data"
             // signal that TranscriptionSession checks for.

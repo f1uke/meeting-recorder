@@ -29,19 +29,14 @@ struct MeetingApp: App {
         }
         .defaultSize(width: 1180, height: 760)
         .windowResizability(.contentMinSize)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             AppCommands(
                 recording: appState.recording,
                 stopAndTranscribe: { Task { await appState.stopAndTranscribe() } },
-                stopOnly: { Task { await appState.stopOnly() } }
+                stopOnly: { Task { await appState.stopOnly() } },
+                openSettings: { appState.showSettings = true }
             )
         }
-
-        // Standalone Settings window. ⌘, in `AppCommands` opens it.
-        Window("Settings", id: "settings") {
-            SettingsView()
-                .appEnvironment(appState)
-        }
-        .windowResizability(.contentMinSize)
     }
 }

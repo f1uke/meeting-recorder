@@ -32,7 +32,8 @@ struct PopoverIdleView: View {
                 trailing: {
                     HStack(spacing: 6) {
                         GlassIconButton(systemImage: "gearshape", size: 26) {
-                            openWindow(id: "settings")
+                            openWindow(id: "main")
+                            appState.showSettings = true
                         }
                         GlassIconButton(systemImage: "books.vertical", size: 26) {
                             appState.route = .library
@@ -344,12 +345,6 @@ struct PopoverRecordingView: View {
                     buffer: recording.outputRMS
                 )
             }
-
-            BookmarksChip(
-                count: recording.marks.count,
-                lastTimestamp: recording.marks.last?.timestamp,
-                onMark: { recording.mark() }
-            )
 
             VStack(spacing: 6) {
                 GlassButton(style: .danger, action: stopAndTranscribe) {
@@ -775,79 +770,6 @@ struct LiveChannelMeter: View {
 
     private var peakText: String {
         String(format: "%.0fdB", buffer.peakDB())
-    }
-}
-
-// =============================================================================
-// MARK: - Bookmarks chip
-// =============================================================================
-
-struct BookmarksChip: View {
-    let count: Int
-    let lastTimestamp: TimeInterval?
-    let onMark: () -> Void
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "flag.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(Color.warmMark)
-            Text(label)
-                .font(.system(size: 11))
-                .foregroundStyle(Color.textDim)
-                .lineLimit(1)
-            Spacer()
-            Button(action: onMark) {
-                HStack(spacing: 4) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 9, weight: .bold))
-                    Text("Mark")
-                    Text("⌘B").font(.mono(9)).opacity(0.6)
-                }
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.brandAccent)
-                .padding(.vertical, 3)
-                .padding(.horizontal, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut("b", modifiers: .command)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(
-                            scheme == .dark
-                                ? Color.white.opacity(0.14)
-                                : Color.white.opacity(0.45),
-                            lineWidth: 0.5
-                        )
-                }
-        }
-    }
-
-    private var label: String {
-        switch (count, lastTimestamp) {
-        case (0, _): return "Mark moments as you go"
-        case (1, let t?): return "1 moment marked · last at \(formatTimestamp(t))"
-        case (let n, let t?): return "\(n) moments marked · last at \(formatTimestamp(t))"
-        case (let n, nil): return "\(n) moment\(n == 1 ? "" : "s") marked"
-        }
-    }
-
-    private func formatTimestamp(_ t: TimeInterval) -> String {
-        let total = Int(t)
-        let h = total / 3600
-        let m = (total / 60) % 60
-        let s = total % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%d:%02d", m, s)
     }
 }
 

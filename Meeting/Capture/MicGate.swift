@@ -92,8 +92,7 @@ final class MicGate: ObservableObject {
 
     /// Starts the underlying detector. `sessionStart` should be the same
     /// `started` Date that lands in `RecordingSession.State.recording` so
-    /// the muted intervals share a clock with `marks.json` and the
-    /// transcript timeline.
+    /// the muted intervals share a clock with the transcript timeline.
     func start(sessionStart: Date) {
         self.sessionStart = sessionStart
         self.muted = []
