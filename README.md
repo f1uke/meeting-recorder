@@ -76,4 +76,4 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full architecture notes and project-speci
 
 ## License
 
-Not yet decided — treat as all-rights-reserved until a `LICENSE` is committed.
+[MIT](./LICENSE) © 2026 Fluke Sattra
