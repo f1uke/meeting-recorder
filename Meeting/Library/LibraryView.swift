@@ -366,6 +366,7 @@ private struct DetailToolbar: View {
     @State private var showDisclosure = false
     @State private var showRetranscribeConfirm = false
     @State private var showOverwriteNoteConfirm = false
+    @State private var showDeleteConfirm = false
 
     private var summaryEnabled: Bool {
         meeting.hasTranscript && appState.llmAvailability == .available
@@ -471,13 +472,14 @@ private struct DetailToolbar: View {
                 : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
             )
 
-            ToolbarButton(icon: "square.and.arrow.up", label: "Share") {
-                NSWorkspace.shared.activateFileViewerSelecting([meeting.folder])
-            }
-
             ToolbarButton(icon: "square.and.arrow.down", label: "Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([meeting.folder])
             }
+
+            ToolbarButton(icon: "trash", label: "Delete") {
+                showDeleteConfirm = true
+            }
+            .help("Move this meeting to the Trash")
 
             Toggle(isOn: starredBinding) {
                 Image(systemName: meeting.starred ? "star.fill" : "star")
@@ -516,6 +518,14 @@ private struct DetailToolbar: View {
             }
         } message: {
             Text("\(appState.meetingNoteURL(for: meeting).lastPathComponent) already exists in your vault. Regenerating will replace its contents.")
+        }
+        .alert("Delete this meeting?", isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Move to Trash", role: .destructive) {
+                library.delete(meeting: meeting.id)
+            }
+        } message: {
+            Text("\(meeting.folder.lastPathComponent) will be moved to the Trash, including the recording, transcripts, and AI summary. You can recover it from the Trash until you empty it.")
         }
     }
 

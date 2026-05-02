@@ -463,6 +463,22 @@ private struct TranscriptionTab: View {
                     )
                 }
 
+                SettingsSection(label: "Glossary") {
+                    GlossaryEditorRow(
+                        value: Binding(
+                            get: { prefs.transcriptionGlossary },
+                            set: { newValue in
+                                prefs.transcriptionGlossary = newValue
+                                appState.applyTranscriptionProviderChange()
+                            }
+                        ),
+                        resetToDefault: {
+                            prefs.transcriptionGlossary = TranscriptionEngine.defaultGlossary
+                            appState.applyTranscriptionProviderChange()
+                        }
+                    )
+                }
+
             case .openai:
                 SettingsSection(label: "OpenAI model") {
                     OpenAIModelPickerRow(

@@ -150,6 +150,35 @@ final class MeetingsLibrary: ObservableObject {
         rescan()
     }
 
+    /// Move a meeting's folder to the Trash and drop its override entry.
+    /// Falls back to a hard delete if Trash isn't available (e.g. on a
+    /// volume that doesn't support it). The watcher will fire a rescan
+    /// shortly after, but we rescan synchronously so the UI updates
+    /// immediately.
+    func delete(meeting id: MeetingRecord.ID) {
+        guard let meeting = meetings.first(where: { $0.id == id }) else { return }
+        do {
+            try FileManager.default.trashItem(at: meeting.folder, resultingItemURL: nil)
+        } catch {
+            do {
+                try FileManager.default.removeItem(at: meeting.folder)
+            } catch {
+                NSLog("[Meeting/Library] delete meeting failed: %@",
+                      String(describing: error))
+                return
+            }
+        }
+        if overrides.meetings.removeValue(forKey: id) != nil {
+            do {
+                try overrides.write(to: libraryFileURL)
+            } catch {
+                NSLog("[Meeting/Library] library.json write after delete failed: %@",
+                      String(describing: error))
+            }
+        }
+        rescan()
+    }
+
     /// Searched meetings used by the list column.
     var visibleMeetings: [MeetingRecord] {
         let trimmed = search.trimmingCharacters(in: .whitespaces).lowercased()

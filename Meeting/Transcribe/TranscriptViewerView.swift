@@ -1070,7 +1070,7 @@ private struct TranscriptScrollPane: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
+            ScrollView(showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 14) {
                     heroBlock
 
