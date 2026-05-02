@@ -1069,7 +1069,7 @@ private struct CalendarTab: View {
 }
 
 /// Editor for the manual group → members map. Used when EventKit can't
-/// expand a Workspace group invite (e.g. `team@finnomena.com`) so the
+/// expand a Workspace group invite (e.g. `team@example.com`) so the
 /// calendar surfaces a single group entry instead of the actual people.
 /// Once a group is mapped here, `CalendarStore.snapshot` substitutes the
 /// expansion when building `calendar.json` for new recordings.

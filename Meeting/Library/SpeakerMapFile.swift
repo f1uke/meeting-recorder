@@ -8,7 +8,7 @@ import Foundation
 ///
 /// The richer fields drive two things:
 ///   1. The LLM summary prompt — Claude gets a roster ("Pim is the
-///      organizer at pim@finnomena.com") so action items can attribute
+///      organizer at pim@example.com") so action items can attribute
 ///      commitments to a real participant rather than a label.
 ///   2. Future cross-meeting analytics — `attendeeId` is stable across
 ///      meetings (it comes from `CalendarAttendee.id`, which is the

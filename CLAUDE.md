@@ -37,7 +37,7 @@ xcodebuild -project Meeting.xcodeproj -scheme Meeting -destination 'platform=mac
 
 ## Code signing and TCC
 
-Stable signing is critical: macOS TCC keys "Allowed apps" by code signature, so ad-hoc signing (`CODE_SIGN_IDENTITY=-`) re-prompts for Screen Recording / Microphone / Audio Capture every rebuild. `project.yml` hardcodes `DEVELOPMENT_TEAM: 49AUFL5Q3U` (Personal Team for `fluke.s@finnomena.com`); switching teams or building unsigned will require re-granting permissions and `tccutil reset All dev.fluke.meeting`.
+Stable signing is critical: macOS TCC keys "Allowed apps" by code signature, so ad-hoc signing (`CODE_SIGN_IDENTITY=-`) re-prompts for Screen Recording / Microphone / Audio Capture every rebuild. `project.yml` hardcodes `DEVELOPMENT_TEAM: 49AUFL5Q3U` (the maintainer's Personal Team); switching teams or building unsigned will require re-granting permissions and `tccutil reset All dev.fluke.meeting`.
 
 ## High-level architecture
 

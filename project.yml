@@ -73,7 +73,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.fluke.meeting
         GENERATE_INFOPLIST_FILE: NO
         # Stable signing keeps TCC permissions across rebuilds.
-        # Switch DEVELOPMENT_TEAM to GBG6CR6BMX for the Finnomena team.
+        # Replace DEVELOPMENT_TEAM below with your own Apple Developer Team ID.
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: 49AUFL5Q3U

@@ -696,7 +696,7 @@ private struct SpeakersPanel: View {
         }
         // Manual rename only touches the display name — leave any
         // existing attendee mapping (email, role) intact so a small
-        // typo fix doesn't unmap "Pim" from pim@finnomena.com.
+        // typo fix doesn't unmap "Pim" from pim@example.com.
         library.updateSpeaker(meeting: meeting.id, speakerID: id) { profile in
             profile.displayName = trimmed
         }
