@@ -464,7 +464,7 @@ private struct VideoPanel: View {
     @ViewBuilder
     private var videoSurface: some View {
         if let player = playerModel.player {
-            VideoPlayer(player: player)
+            AVPlayerViewRepresentable(player: player)
                 .background(Color.black)
         } else {
             ZStack {
@@ -568,7 +568,7 @@ private struct FullscreenVideoOverlay: View {
         ZStack(alignment: .topTrailing) {
             Color.black.ignoresSafeArea()
             if let player = playerModel.player {
-                VideoPlayer(player: player)
+                AVPlayerViewRepresentable(player: player)
                     .ignoresSafeArea()
             } else {
                 ProgressView().tint(.white)
@@ -1428,6 +1428,36 @@ private struct LoadingTranscriptPlaceholder: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Color.textDim)
             }
+        }
+    }
+}
+
+// =============================================================================
+// MARK: - AVPlayerView NSViewRepresentable
+// =============================================================================
+
+/// Direct `AVPlayerView` wrapper instead of SwiftUI's `VideoPlayer`. On
+/// macOS 26 / Xcode 26 Release builds, `VideoPlayer` aborts in
+/// `swift::getSuperclassMetadata` while AVKit_SwiftUI's internal generic
+/// class tries to demangle its `So12AVPlayerViewC` superclass — a runtime
+/// metadata-init bug we can't reach from app code. Driving `AVPlayerView`
+/// ourselves through `NSViewRepresentable` sidesteps the failing generic
+/// class entirely and gives us a stable inline player with native chrome.
+private struct AVPlayerViewRepresentable: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .inline
+        view.allowsPictureInPicturePlayback = true
+        view.showsFullScreenToggleButton = false
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        if view.player !== player {
+            view.player = player
         }
     }
 }
