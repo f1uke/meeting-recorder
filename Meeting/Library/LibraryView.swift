@@ -365,26 +365,15 @@ private struct DetailToolbar: View {
     @AppStorage("dev.fluke.meeting.summaryDisclosureSeen") private var disclosureSeen = false
     @State private var showDisclosure = false
     @State private var showRetranscribeConfirm = false
-    @State private var showOverwriteNoteConfirm = false
     @State private var showDeleteConfirm = false
 
     private var summaryEnabled: Bool {
-        meeting.hasTranscript && appState.llmAvailability == .available
+        meeting.hasTranscript && appState.llmAvailability == .available && !isGeneratingSummary
     }
 
-    private var noteEnabled: Bool {
-        meeting.hasTranscript &&
-            appState.llmAvailability == .available &&
-            !isGeneratingNote
-    }
-
-    private var isGeneratingNote: Bool {
-        if case .running = appState.noteGeneration[meeting.id] { return true }
+    private var isGeneratingSummary: Bool {
+        if case .running = appState.summaryGeneration[meeting.id] { return true }
         return false
-    }
-
-    private var noteAlreadyExists: Bool {
-        FileManager.default.fileExists(atPath: appState.meetingNoteURL(for: meeting).path)
     }
 
     private var hasAudio: Bool {
@@ -410,16 +399,15 @@ private struct DetailToolbar: View {
         await appState.generateSummary(for: meeting)
     }
 
-    private func generateOrRegenerateNote() {
-        if !disclosureSeen {
-            showDisclosure = true
-            return
+    private var summaryHelpText: String {
+        guard summaryEnabled else {
+            return "Install Claude Code: npm i -g @anthropic-ai/claude-code"
         }
-        if noteAlreadyExists {
-            showOverwriteNoteConfirm = true
-            return
-        }
-        Task { await appState.generateMeetingNote(for: meeting) }
+        let vault = AppPreferences.shared.meetingNotesFolder
+        let prefix = meeting.summary == nil
+            ? "Generate AI summary via Claude"
+            : "Regenerate via Claude"
+        return "\(prefix); writes Markdown note to \(vault)"
     }
 
     var body: some View {
@@ -451,26 +439,14 @@ private struct DetailToolbar: View {
                     : "Audio files (mic.m4a / output.m4a) not found in folder"
             )
 
-            ToolbarButton(icon: "sparkles", label: "Summary") {
+            ToolbarButton(
+                icon: isGeneratingSummary ? "ellipsis" : "sparkles",
+                label: isGeneratingSummary ? "Generating…" : "Summary"
+            ) {
                 Task { await generateOrRegenerate() }
             }
             .disabled(!summaryEnabled)
-            .help(summaryEnabled
-                ? (meeting.summary == nil ? "Generate AI summary via Claude" : "Regenerate via Claude")
-                : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
-            )
-
-            ToolbarButton(
-                icon: isGeneratingNote ? "ellipsis" : "doc.text",
-                label: isGeneratingNote ? "Writing…" : "Note"
-            ) {
-                generateOrRegenerateNote()
-            }
-            .disabled(!noteEnabled)
-            .help(noteEnabled
-                ? "Generate a Markdown meeting note in \(AppPreferences.shared.meetingNotesFolder)"
-                : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
-            )
+            .help(summaryHelpText)
 
             ToolbarButton(icon: "square.and.arrow.down", label: "Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([meeting.folder])
@@ -501,7 +477,7 @@ private struct DetailToolbar: View {
                 Task { await appState.generateSummary(for: meeting) }
             }
         } message: {
-            Text("AI summary uses your Claude Code installation to generate a summary and action items. The transcript will be sent to Claude. This is the only step that ever leaves your Mac — recording and transcription stay local.")
+            Text("AI summary uses your Claude Code installation to generate a summary, action items, and a Markdown meeting note (saved to your notes folder). The transcript will be sent to Claude. This is the only step that ever leaves your Mac — recording and transcription stay local.")
         }
         .alert("Re-transcribe meeting?", isPresented: $showRetranscribeConfirm) {
             Button("Cancel", role: .cancel) {}
@@ -510,14 +486,6 @@ private struct DetailToolbar: View {
             }
         } message: {
             Text("This overwrites transcript.json, transcript.md, and transcript.srt. Any inline segment edits in the Transcript Viewer will be lost. The cached AI summary will become out of date — regenerate it after.")
-        }
-        .alert("Overwrite existing note?", isPresented: $showOverwriteNoteConfirm) {
-            Button("Cancel", role: .cancel) {}
-            Button("Regenerate", role: .destructive) {
-                Task { await appState.generateMeetingNote(for: meeting) }
-            }
-        } message: {
-            Text("\(appState.meetingNoteURL(for: meeting).lastPathComponent) already exists in your vault. Regenerating will replace its contents.")
         }
         .alert("Delete this meeting?", isPresented: $showDeleteConfirm) {
             Button("Cancel", role: .cancel) {}

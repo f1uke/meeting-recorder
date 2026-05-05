@@ -37,13 +37,20 @@ actor ClaudeCLIProvider: LLMProvider {
         let llmJSON = Self.stripJSONFences(inner)
 
         struct Wire: Codable {
+            let tldr: String?
             let summary: String
+            let keyDecisions: [String]?
             let actionItems: [WireItem]
+            let discussionTopics: [WireTopic]?
         }
         struct WireItem: Codable {
             let speaker: String
             let text: String
             let timestamp: String
+        }
+        struct WireTopic: Codable {
+            let heading: String
+            let bullets: [String]
         }
 
         guard let data = llmJSON.data(using: .utf8) else {
@@ -54,7 +61,7 @@ actor ClaudeCLIProvider: LLMProvider {
             wire = try JSONDecoder().decode(Wire.self, from: data)
         } catch {
             throw LLMError.decodeFailed(
-                "Expected JSON {summary, actionItems[]}: \(error.localizedDescription)\n\nRaw:\n\(llmJSON.prefix(800))"
+                "Expected JSON {tldr, summary, keyDecisions[], actionItems[], discussionTopics[]}: \(error.localizedDescription)\n\nRaw:\n\(llmJSON.prefix(800))"
             )
         }
 
@@ -64,39 +71,13 @@ actor ClaudeCLIProvider: LLMProvider {
                 ActionItem(speaker: item.speaker, text: item.text, timestamp: item.timestamp)
             },
             generatedAt: Date(),
-            providerName: name
+            providerName: name,
+            tldr: wire.tldr?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            keyDecisions: wire.keyDecisions?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            discussionTopics: wire.discussionTopics?.map {
+                DiscussionTopic(heading: $0.heading, bullets: $0.bullets)
+            }
         )
-    }
-
-    func generateMeetingNote(context: MeetingLLMContext) async throws -> String {
-        guard let claudePath else {
-            throw LLMError.notInstalled("which claude returned nothing")
-        }
-
-        let prompt = Self.buildNotePrompt(context: context)
-        let raw = try await Self.runClaude(
-            at: claudePath,
-            input: prompt,
-            workingDirectory: context.meetingFolder
-        )
-        let inner = try Self.parseClaudeOutput(raw)
-        // Even with explicit "no fences" instruction, Claude occasionally
-        // wraps the document. Strip a leading ```markdown / ``` and the
-        // trailing fence. Plain text passes through unchanged.
-        let stripped = Self.stripMarkdownFences(inner)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !stripped.isEmpty else {
-            throw LLMError.empty
-        }
-        // A valid note should at least have the YAML frontmatter we
-        // asked for. If it doesn't, surface the raw response instead of
-        // silently writing junk to the user's vault.
-        guard stripped.hasPrefix("---") else {
-            throw LLMError.decodeFailed(
-                "Expected Markdown with YAML frontmatter; got:\n\(stripped.prefix(400))"
-            )
-        }
-        return stripped
     }
 
     // MARK: - Helpers
@@ -172,6 +153,11 @@ actor ClaudeCLIProvider: LLMProvider {
         let rosterSection = buildRosterSection(context: context)
         let contextSection = buildContextSection(context: context)
 
+        // Single rich-JSON prompt — drives both the in-app Summary card
+        // (Library detail) and the Markdown meeting note that
+        // `MeetingNoteRenderer` writes to the user's vault. We render
+        // the note locally from this JSON so we never re-pay the input
+        // transcript cost on a second call.
         return """
         You are extracting structured insights from a meeting transcript.
         \(metaSection)\(rosterSection)\(contextSection)
@@ -179,121 +165,37 @@ actor ClaudeCLIProvider: LLMProvider {
          no markdown fences, no explanation. The shape must be:
 
         {
+          "tldr": "One-line summary in the transcript's primary language. ~12-20 words.",
           "summary": "1-2 paragraph plain text summary in the transcript's primary language. Use **bold** to mark 2-4 key phrases.",
+          "keyDecisions": [
+            "Move Q1 release to Mar 15 to give QA an extra week"
+          ],
           "actionItems": [
             {
               "speaker": "Pim",
               "text": "Move Aof from platform to agent track by Mon",
               "timestamp": "14:22"
             }
+          ],
+          "discussionTopics": [
+            {
+              "heading": "Q1 Roadmap",
+              "bullets": [
+                "Customer X needs feature ready by Mar 15",
+                "Engineering capacity tight after Tar's leave"
+              ]
+            }
           ]
         }
 
         Rules:
-        - "actionItems" is an array of concrete commitments / TODOs from the meeting. Empty array if none.
-        - "speaker" matches a display name from the Speakers roster above. Use "You" if the user (the one whose mic is recorded — the speaker labeled "Me") committed to the action.
-        - "timestamp" is mm:ss or h:mm:ss matching the action's appearance in the transcript.
-        - Match the transcript's primary language for "summary" and action item text.
-
-        Transcript:
-
-        \(body)
-        """
-    }
-
-    /// Meeting-note prompt — variant of `buildPrompt` that asks Claude
-    /// for a complete Markdown document with YAML frontmatter instead
-    /// of a JSON summary. Same metadata / roster / context sections
-    /// flow into both prompts; only the output instructions differ.
-    private static func buildNotePrompt(context: MeetingLLMContext) -> String {
-        let transcript = context.transcript
-
-        let nameByID: [SpeakerID: String] = {
-            var map = Dictionary(uniqueKeysWithValues: transcript.speakers.map { ($0.id, $0.displayName) })
-            for profile in context.speakerProfiles {
-                map[profile.id] = profile.displayName
-            }
-            return map
-        }()
-
-        var body = ""
-        for seg in transcript.segments {
-            let stamp = formatTimestamp(seg.start)
-            let name = nameByID[seg.speaker] ?? seg.speaker.rawValue
-            body += "[\(stamp)] **\(name)**: \(seg.text)\n\n"
-        }
-
-        let metaSection = buildMetaSection(context: context)
-        let rosterSection = buildRosterSection(context: context)
-        let contextSection = buildContextSection(context: context)
-
-        return """
-        You are a meeting-note writer for the user's Obsidian vault.\
-         Output ONE Markdown document with YAML frontmatter — nothing\
-         else, no fences, no commentary.
-        \(metaSection)\(rosterSection)\(contextSection)
-        Output structure (preserve this skeleton; replace placeholders\
-         with content drawn from the transcript and captured items):
-
-        ---
-        title: <Meeting title>
-        date: <YYYY-MM-DD>
-        time: "<HH:MM>"
-        duration: <Xh Ym>
-        attendees:
-          - <Name 1>
-          - <Name 2>
-        tags:
-          - meeting
-        location: <or omit if empty>
-        source: <meeting folder absolute path>
-        ---
-
-        # <Meeting title>
-
-        > <One-line tldr in transcript's primary language>
-
-        ## Overview
-        **When:** <YYYY-MM-DD HH:MM — HH:MM (Xh Ym)>
-        **Where:** <Location>
-        **Conference:** <[host](url) or omit>
-
-        ## Summary
-        <1-2 paragraph summary in transcript's primary language. Use **bold** to mark 2-4 key phrases.>
-
-        ## Key Decisions
-        - <Decision 1>
-        - <Decision 2>
-
-        ## Action Items
-        - [ ] **<Speaker>**: <action> · `<mm:ss>`
-
-        ## Discussion Notes
-        ### <Topic Heading>
-        - <Bullet point>
-        - <Bullet point>
-
-        ### <Topic Heading>
-        - <Bullet point>
-
-        ## References
-        - [<Page title>](<URL>) · `<mm:ss>`
-
-        ## Captured Materials
-        - 📎 `clipboard/<filename>` · `<mm:ss>`
-
-        ---
-        *Generated by Claude on <YYYY-MM-DD HH:MM>*
-
-        Rules:
-        - Match the transcript's primary language for prose, action items, and decisions.
-        - Action items must use Obsidian checkbox syntax `- [ ]`.
-        - Speaker names match the Speakers roster above; use "You" for the user (the speaker labeled "Me").
-        - Timestamps in mm:ss or h:mm:ss matching transcript appearance.
-        - "Discussion Notes" must be 3-6 topical sections, NOT a chronological replay. Group related points across the meeting under each topic heading.
-        - Empty sections print "_None recorded_" or "_None_" rather than being omitted.
-        - For images in the captured list, the working directory is the meeting folder; you may Read them if visual context would meaningfully change the note. Embed inline as `![](clipboard/<filename>)` only when essential — most meetings won't need it.
-        - Output ONLY the Markdown document. No code fences, no preamble, no postscript.
+        - Match the transcript's primary language for ALL prose (tldr, summary, decisions, action item text, topic headings, bullets).
+        - "tldr" is one short sentence — what the meeting was about + the most important outcome.
+        - "summary" is 1-2 paragraphs. Use **bold** for 2-4 key phrases. Plain Markdown allowed (bold, italic, inline code) — no headings, no lists.
+        - "keyDecisions" is concrete decisions reached, NOT proposals or open questions. Empty array if none.
+        - "actionItems" is concrete commitments / TODOs assigned to a person. Empty array if none. "speaker" matches a display name from the Speakers roster above; use "You" for the user (the one labeled "Me"). "timestamp" is mm:ss or h:mm:ss matching where the commitment was made.
+        - "discussionTopics" is 3-6 topical sections grouping related points across the meeting, NOT a chronological replay. Each topic has a short heading and 2-5 bullets. Bullets are plain text (Markdown bold/italic OK), no nested lists. Empty array only if the meeting was too short to warrant topical grouping.
+        - Output ONLY the JSON object. No fences, no preamble.
 
         Transcript:
 
@@ -477,23 +379,6 @@ actor ClaudeCLIProvider: LLMProvider {
         return raw
     }
 
-    /// Strip a leading ```markdown / ``` fence and the trailing ``` from
-    /// Claude's note output. Same defensive pattern as `stripJSONFences`
-    /// — Claude occasionally wraps the document despite "no fences"
-    /// instructions, especially when the body contains its own fenced
-    /// code blocks.
-    private static func stripMarkdownFences(_ s: String) -> String {
-        var trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("```") else { return trimmed }
-        if let firstNewline = trimmed.firstIndex(of: "\n") {
-            trimmed = String(trimmed[trimmed.index(after: firstNewline)...])
-        }
-        if let lastFence = trimmed.range(of: "```", options: .backwards) {
-            trimmed = String(trimmed[..<lastFence.lowerBound])
-        }
-        return trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     /// Some prompts make Claude wrap JSON in ```json fences despite the
     /// instruction not to. Strip them defensively before decoding.
     private static func stripJSONFences(_ s: String) -> String {
@@ -519,4 +404,8 @@ actor ClaudeCLIProvider: LLMProvider {
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%02d:%02d", m, s)
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

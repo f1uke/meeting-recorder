@@ -4,14 +4,66 @@ import Foundation
 // MARK: - Public types
 // =============================================================================
 
-/// LLM-generated summary + action items for one meeting. Cached on disk
-/// at `<meeting>/summary.json` so repeated opens of the Library detail
-/// pane don't re-prompt.
+/// LLM-generated insights for one meeting. Cached on disk at
+/// `<meeting>/summary.json` so repeated opens of the Library detail pane
+/// don't re-prompt — and so the Markdown meeting note can be rendered
+/// locally from this same cache without a second LLM round-trip.
+///
+/// `tldr`, `keyDecisions`, and `discussionTopics` were added when the
+/// note generation moved from a second Claude call to local rendering.
+/// They're optional so legacy `summary.json` files written before that
+/// change still decode — `MeetingNoteRenderer` falls back gracefully on
+/// nil for the corresponding sections.
 struct Summary: Codable, Equatable, Hashable, Sendable {
     var summary: String                      // 1-2 paragraph natural-language summary
     var actionItems: [ActionItem]
     var generatedAt: Date
     var providerName: String                 // e.g. "Claude CLI"
+    /// One-line tldr in the transcript's primary language. Used as the
+    /// `> blockquote` directly under the Markdown note's title.
+    var tldr: String?
+    /// Concrete decisions reached in the meeting — separate from action
+    /// items (which are commitments/TODOs assigned to a person).
+    var keyDecisions: [String]?
+    /// 3-6 topical sections grouping related discussion across the
+    /// meeting (NOT a chronological replay).
+    var discussionTopics: [DiscussionTopic]?
+
+    /// Whether this Summary has the rich fields needed to render a
+    /// complete Markdown note. False for legacy summaries (pre-renderer)
+    /// — callers re-run generation to upgrade.
+    var hasRichFields: Bool {
+        tldr != nil || keyDecisions != nil || discussionTopics != nil
+    }
+}
+
+struct DiscussionTopic: Codable, Equatable, Hashable, Sendable, Identifiable {
+    let id: UUID
+    var heading: String
+    var bullets: [String]
+
+    init(id: UUID = UUID(), heading: String, bullets: [String]) {
+        self.id = id
+        self.heading = heading
+        self.bullets = bullets
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case heading, bullets
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = UUID()
+        self.heading = try c.decode(String.self, forKey: .heading)
+        self.bullets = try c.decode([String].self, forKey: .bullets)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(heading, forKey: .heading)
+        try c.encode(bullets, forKey: .bullets)
+    }
 }
 
 struct ActionItem: Codable, Equatable, Sendable, Identifiable, Hashable {
@@ -51,13 +103,12 @@ protocol LLMProvider: Sendable {
     /// key configured). Cheap — called from UI to disable / enable buttons.
     func availability() async -> LLMAvailability
 
+    /// Generate the rich Summary (tldr, paragraph summary, decisions,
+    /// action items, discussion topics) in a single LLM call. The
+    /// Markdown meeting note is rendered locally from this — see
+    /// `MeetingNoteRenderer` — so we never pay the input transcript
+    /// cost twice.
     func generateSummary(context: MeetingLLMContext) async throws -> Summary
-
-    /// Render a complete Markdown meeting note for the user's notes
-    /// vault (designed for Obsidian, but the output is plain Markdown
-    /// + YAML frontmatter so any vault works). The provider returns
-    /// the rendered string; the caller writes it to disk.
-    func generateMeetingNote(context: MeetingLLMContext) async throws -> String
 }
 
 /// Bundle handed to `LLMProvider.generateSummary`. Beyond the bare

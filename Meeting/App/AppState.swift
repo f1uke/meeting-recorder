@@ -38,14 +38,12 @@ final class AppState: ObservableObject {
 
     /// Per-meeting summary generation status — keyed by MeetingRecord.id
     /// so Library detail and Transcript viewer can show a spinner /
-    /// surfaced error inline without juggling local state.
+    /// surfaced error inline without juggling local state. Tracks the
+    /// combined operation: Claude call → cache summary.json → render
+    /// + write Markdown note to the user's vault. The note write is
+    /// best-effort (state stays `.done` even if the vault write fails;
+    /// the failure shows up as a separate toast).
     @Published private(set) var summaryGeneration: [MeetingRecord.ID: SummaryGenerationState] = [:]
-
-    /// Per-meeting Markdown-note generation status. Same shape as
-    /// `summaryGeneration` but tracks the "Note" toolbar action — the
-    /// Library detail's Note button reads this to disable / show a
-    /// spinner / surface an error inline.
-    @Published private(set) var noteGeneration: [MeetingRecord.ID: NoteGenerationState] = [:]
 
     init() {
         self.recording = RecordingSession()
@@ -207,13 +205,18 @@ final class AppState: ObservableObject {
         )
     }
 
-    /// Generate (or refresh) the AI summary for a meeting via the LLM
-    /// provider. Pipes the meeting's transcript through Claude CLI,
-    /// caches the result to summary.json, and re-publishes via
-    /// `summaryGeneration` so any view watching the meeting picks up
-    /// the new state.
+    /// Generate (or refresh) the AI summary for a meeting and write
+    /// the Markdown note to the user's vault — one button, one Claude
+    /// call. Pipes the transcript through the LLM, caches the result
+    /// to `summary.json`, then renders the note locally via
+    /// `MeetingNoteRenderer` and writes it to
+    /// `<meetingNotesFolder>/<yyyy-MM-dd>-<title-slug>.md`. The vault
+    /// write is best-effort: a failure surfaces as a separate toast
+    /// and leaves `summaryGeneration` at `.done` since the canonical
+    /// summary.json was already written successfully.
     func generateSummary(for meeting: MeetingRecord) async {
         summaryGeneration[meeting.id] = .running
+        let summary: Summary
         do {
             let merged = try MergedTranscript.read(from: meeting.folder)
             let context = MeetingLLMContext(
@@ -223,58 +226,35 @@ final class AppState: ObservableObject {
                 contextItems: meeting.contextItems,
                 meetingFolder: meeting.folder
             )
-            let summary = try await llm.generateSummary(context: context)
+            summary = try await llm.generateSummary(context: context)
             try summary.write(to: meeting.folder)
             summaryGeneration[meeting.id] = .done(summary)
             library.rescan()
         } catch {
             summaryGeneration[meeting.id] = .failed(error.localizedDescription)
+            return
         }
-    }
 
-    /// Generate a Markdown meeting note for the user's vault. Pipes
-    /// the transcript + metadata + captured items through Claude, then
-    /// writes the result to
-    /// `<meetingNotesFolder>/<yyyy-MM-dd>-<title-slug>.md`. Existing
-    /// files are overwritten; the caller is expected to confirm with
-    /// the user first when one already exists. Surfaces a toast with
-    /// "Reveal in Finder" on success.
-    func generateMeetingNote(for meeting: MeetingRecord) async {
-        noteGeneration[meeting.id] = .running
+        // Render + write the vault note from the rich summary. Use the
+        // post-rescan record so we pick up any speaker/context updates
+        // that landed during the Claude call. Failures surface as a
+        // toast — the summary itself is already cached on disk so we
+        // don't want to flip the Library spinner back to red.
+        let current = library.meetings.first(where: { $0.id == meeting.id }) ?? meeting
+        let markdown = MeetingNoteRenderer.render(meeting: current, summary: summary)
         do {
-            let merged = try MergedTranscript.read(from: meeting.folder)
-            let context = MeetingLLMContext(
-                transcript: merged,
-                speakerProfiles: meeting.speakerProfiles,
-                calendarEvent: meeting.calendarEvent,
-                contextItems: meeting.contextItems,
-                meetingFolder: meeting.folder
-            )
-            let markdown = try await llm.generateMeetingNote(context: context)
             let destinationURL = try Self.writeMeetingNote(
                 markdown: markdown,
-                meeting: meeting,
+                meeting: current,
                 folderPath: AppPreferences.shared.meetingNotesFolder
             )
-            noteGeneration[meeting.id] = .done(destinationURL)
             toast.showMeetingNoteSaved(
-                meetingTitle: meeting.title,
+                meetingTitle: current.title,
                 fileURL: destinationURL
             )
         } catch {
-            noteGeneration[meeting.id] = .failed(error.localizedDescription)
+            NSLog("Meeting note write failed: \(error.localizedDescription)")
         }
-    }
-
-    /// Returns the destination URL the note will land at, given a
-    /// meeting and the current preferences. Lets the UI check for an
-    /// existing file before triggering generation so the regenerate
-    /// confirmation is accurate.
-    func meetingNoteURL(for meeting: MeetingRecord) -> URL {
-        Self.meetingNoteURL(
-            for: meeting,
-            folderPath: AppPreferences.shared.meetingNotesFolder
-        )
     }
 
     private static func meetingNoteURL(
@@ -351,13 +331,6 @@ final class AppState: ObservableObject {
 enum SummaryGenerationState: Equatable {
     case running
     case done(Summary)
-    case failed(String)
-}
-
-enum NoteGenerationState: Equatable {
-    case running
-    /// The URL the Markdown file was written to in the user's vault.
-    case done(URL)
     case failed(String)
 }
 
