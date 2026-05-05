@@ -265,7 +265,12 @@ final class MeetingsLibrary: ObservableObject {
         // Names captured by AX-scraping Meet's video tiles during the
         // recording — fills in the people that EventKit-only attendees
         // couldn't enumerate (group invites, late joiners, etc.).
-        let meetParticipants = MeetParticipantsFile.read(from: folder)?.participants ?? []
+        // Re-apply the current heuristic at read time so meetings
+        // recorded with a looser earlier filter (chat fragments,
+        // "<Name> joined", emoji reactions, etc.) get cleaned up
+        // automatically without re-scraping.
+        let meetParticipants = (MeetParticipantsFile.read(from: folder)?.participants ?? [])
+            .filter { MeetParticipantsScraper.looksLikeParticipantName($0) }
 
         // Clipboard + browser context captured during recording. Sorted
         // chronologically so the UI can render them in capture order.

@@ -57,6 +57,21 @@ extension MergedTranscript {
             speakers: speakers
         )
     }
+
+    /// Drop one segment from the timeline. Used by the Transcript Viewer's
+    /// per-row delete action to remove hallucinated chunks or filler
+    /// utterances. The on-disk `transcript.md` / `transcript.srt` exports
+    /// don't auto-regenerate — the user re-runs the Export action when
+    /// they want the derived files refreshed.
+    func removingSegment(id: TranscriptSegment.ID) -> MergedTranscript {
+        MergedTranscript(
+            duration: duration,
+            language: language,
+            providers: providers,
+            segments: segments.filter { $0.id != id },
+            speakers: speakers
+        )
+    }
 }
 
 enum TranscriptMerger {

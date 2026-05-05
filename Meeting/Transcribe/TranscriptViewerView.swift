@@ -53,7 +53,7 @@ private struct TranscriptMainPane: View {
     @State private var search: String = ""
     @State private var isVideoFullScreen: Bool = false
     @StateObject private var playerModel = VideoPlayerModel()
-    @AppStorage("transcript.viewer.columnWidth") private var columnWidth: Double = 380
+    @AppStorage("transcript.viewer.columnWidth") private var columnWidth: Double = 560
 
     var body: some View {
         VStack(spacing: 0) {
@@ -350,12 +350,11 @@ private struct TranscriptLeftColumn: View {
             .padding(.horizontal, 14)
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 12) {
-                    SpeakersPanel(
+                    SpeakersAttendeesRow(
                         meeting: meeting,
                         transcript: transcript,
                         playerModel: playerModel
                     )
-                    AttendeesPanel(meeting: meeting)
                     if !meeting.contextItems.isEmpty {
                         ContextPanel(meeting: meeting)
                     }
@@ -367,6 +366,51 @@ private struct TranscriptLeftColumn: View {
             .scrollIndicators(.hidden)
         }
         .padding(.vertical, 16)
+    }
+}
+
+/// Speakers + Attendees layout. Side-by-side when the left column is
+/// wide enough that both cards stay readable; falls back to stacked
+/// when the user collapses the column. We branch on the column-width
+/// `@AppStorage` value rather than `ViewThatFits` because the latter
+/// can't choose between two flexible-width layouts deterministically —
+/// both branches have `.frame(maxWidth: .infinity)` children, so
+/// neither has a clear "ideal size" to fail to fit.
+private struct SpeakersAttendeesRow: View {
+    let meeting: MeetingRecord
+    let transcript: MergedTranscript
+    @ObservedObject var playerModel: VideoPlayerModel
+    @AppStorage("transcript.viewer.columnWidth") private var columnWidth: Double = 560
+
+    /// Threshold below which the side-by-side layout becomes too cramped
+    /// to be useful. Speakers row needs ~220pt for "Drink Sirichai" +
+    /// duration, Attendees needs ~220pt for "gun.ka@finnomena.com" pills
+    /// to stop wrapping every line — plus 12pt spacing and 28pt of
+    /// horizontal padding on the enclosing column.
+    private let sideBySideThreshold: Double = 480
+
+    var body: some View {
+        if columnWidth >= sideBySideThreshold {
+            HStack(alignment: .top, spacing: 12) {
+                SpeakersPanel(
+                    meeting: meeting,
+                    transcript: transcript,
+                    playerModel: playerModel
+                )
+                .frame(maxWidth: .infinity, alignment: .top)
+                AttendeesPanel(meeting: meeting)
+                    .frame(maxWidth: .infinity, alignment: .top)
+            }
+        } else {
+            VStack(spacing: 12) {
+                SpeakersPanel(
+                    meeting: meeting,
+                    transcript: transcript,
+                    playerModel: playerModel
+                )
+                AttendeesPanel(meeting: meeting)
+            }
+        }
     }
 }
 
@@ -625,10 +669,9 @@ private struct SpeakersPanel: View {
                         draftName: $draftName,
                         sampleAvailable: sampleRange(for: speaker.id) != nil,
                         isPlayingSample: samplePlayer.playingSpeaker == speaker.id,
-                        onStartEdit: {
-                            editingID = speaker.id
-                            draftName = speaker.displayName
-                        },
+                        canJump: hasSegments(for: speaker.id),
+                        onTap: { handleRowTap(speaker: speaker) },
+                        onRequestRename: { startEdit(speaker: speaker) },
                         onCommit: { commit(id: speaker.id) },
                         onPlaySample: { toggleSample(for: speaker.id) },
                         onDropAttendee: speaker.id == .me ? nil : { attendeeID in
@@ -649,6 +692,46 @@ private struct SpeakersPanel: View {
         transcript.segments
             .filter { $0.speaker == id }
             .reduce(0) { $0 + ($1.end - $1.start) }
+    }
+
+    private func hasSegments(for id: SpeakerID) -> Bool {
+        transcript.segments.contains { $0.speaker == id }
+    }
+
+    /// Tap-on-name behaviour. In default mode this seeks the video to
+    /// the speaker's next utterance after the playhead, wrapping back
+    /// to their first segment when the user is past the last. While
+    /// inline rename is active for some other row, taps switch the
+    /// edit target instead so the existing rename workflow keeps
+    /// working without an extra Edit-button round-trip.
+    private func handleRowTap(speaker: Speaker) {
+        if let editingID, editingID != speaker.id {
+            commit(id: editingID)
+            startEdit(speaker: speaker)
+            return
+        }
+        if editingID == speaker.id {
+            return
+        }
+        jump(to: speaker.id)
+    }
+
+    private func startEdit(speaker: Speaker) {
+        editingID = speaker.id
+        draftName = speaker.displayName
+    }
+
+    /// Seek the video to the next segment of `id` whose start is past
+    /// the current playhead (with a small fudge to avoid bouncing on
+    /// the current segment). Wraps to the speaker's first segment when
+    /// the playhead is past their last — clicking the same speaker
+    /// repeatedly cycles through their utterances.
+    private func jump(to id: SpeakerID) {
+        let candidates = transcript.segments.filter { $0.speaker == id }
+        guard let first = candidates.first else { return }
+        let now = playerModel.currentTime
+        let next = candidates.first(where: { $0.start > now + 0.5 }) ?? first
+        playerModel.seek(to: next.start)
     }
 
     /// Pick a representative speech range to play as the speaker sample.
@@ -705,13 +788,13 @@ private struct SpeakersPanel: View {
 
     /// Top-right "Edit / Done" button: when nothing is focused, drop the
     /// first non-Me speaker into edit mode (so a single click is enough
-    /// to start typing); when editing, commit + exit.
+    /// to start typing); when editing, commit + exit. Per-row rename
+    /// from the context menu uses `startEdit(speaker:)` directly.
     private func handleEditTap() {
         if let id = editingID {
             commit(id: id)
         } else if let target = meeting.speakers.first(where: { $0.id != .me }) {
-            draftName = target.displayName
-            editingID = target.id
+            startEdit(speaker: target)
         }
     }
 
@@ -787,7 +870,17 @@ private struct SpeakerRow: View {
     /// when false (e.g. transcript with only word-level fragments).
     let sampleAvailable: Bool
     let isPlayingSample: Bool
-    let onStartEdit: () -> Void
+    /// True when this speaker has at least one segment to seek to.
+    /// Disables the tap-to-jump cursor styling for empty rows (e.g.
+    /// "Me" when the user never spoke).
+    let canJump: Bool
+    /// Single-tap on the name. Owned by the parent panel — defaults
+    /// to "jump to next utterance" but switches to "change edit
+    /// target" while inline rename is active.
+    let onTap: () -> Void
+    /// Right-click → "Rename" target. Always available, regardless
+    /// of the panel's current edit state.
+    let onRequestRename: () -> Void
     let onCommit: () -> Void
     let onPlaySample: () -> Void
     /// Called when an AttendeePill is dropped on this row. nil to disable
@@ -813,7 +906,13 @@ private struct SpeakerRow: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.textPrimary)
                     .contentShape(Rectangle())
-                    .onTapGesture(perform: onStartEdit)
+                    .onTapGesture(perform: onTap)
+                    .help(canJump
+                        ? "Click to jump to \(speaker.displayName)'s next utterance — right-click to rename"
+                        : "Right-click to rename")
+                    .contextMenu {
+                        Button("Rename", action: onRequestRename)
+                    }
             }
             Spacer()
             sampleButton
@@ -1126,6 +1225,9 @@ private struct TranscriptScrollPane: View {
                             onSeek: { playerModel.seek(to: segment.start) },
                             onCommitEdit: { newText in
                                 transcript = transcript.updatingSegment(id: segment.id, text: newText)
+                            },
+                            onDelete: {
+                                transcript = transcript.removingSegment(id: segment.id)
                             }
                         )
                         .id(segment.id)
@@ -1174,39 +1276,17 @@ private struct TranscriptScrollPane: View {
         return segments[best].id
     }
 
-    /// Pre-compute a `[segment.id: action-item]` lookup. Each action item's
-    /// timestamp is binary-searched against segment starts so we don't pay
-    /// O(items · segments) on every body re-render.
+    /// Pre-compute a `[segment.id: action-item]` lookup via
+    /// `ActionItemMatcher` — speaker-aware window matching that snaps
+    /// past short filler segments. See `ActionItemMatcher.match` for
+    /// the algorithm and rationale.
     private func actionItemMap() -> [TranscriptSegment.ID: ActionItem] {
-        guard let items = meeting.summary?.actionItems, !items.isEmpty else {
-            return [:]
-        }
-        let segments = transcript.segments
-        guard !segments.isEmpty else { return [:] }
-        var map: [TranscriptSegment.ID: ActionItem] = [:]
-        for item in items {
-            guard let t = item.timestampSeconds else { continue }
-            // Find the rightmost segment with start <= t, then verify
-            // t < end. Same shape as activeSegmentID(at:).
-            var lo = 0
-            var hi = segments.count - 1
-            var best = -1
-            while lo <= hi {
-                let mid = (lo &+ hi) >> 1
-                if segments[mid].start <= t {
-                    best = mid
-                    lo = mid &+ 1
-                } else {
-                    hi = mid &- 1
-                }
-            }
-            guard best >= 0 else { continue }
-            let seg = segments[best]
-            if t < seg.end {
-                map[seg.id] = item
-            }
-        }
-        return map
+        ActionItemMatcher.match(
+            items: meeting.summary?.actionItems ?? [],
+            segments: transcript.segments,
+            speakers: meeting.speakers,
+            speakerProfiles: meeting.speakerProfiles
+        )
     }
 
     @ViewBuilder
@@ -1255,6 +1335,7 @@ private struct SegmentRow: View {
     let isActive: Bool
     let onSeek: () -> Void
     let onCommitEdit: (String) -> Void
+    let onDelete: () -> Void
 
     @State private var isEditing = false
     @State private var draft = ""
@@ -1366,6 +1447,17 @@ private struct SegmentRow: View {
         }
         .animation(.easeInOut(duration: 0.18), value: isActive)
         .onHover { isHovering = $0 }
+        .contextMenu {
+            Button {
+                draft = segment.text
+                isEditing = true
+            } label: {
+                Label("Edit text", systemImage: "pencil")
+            }
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete segment", systemImage: "trash")
+            }
+        }
     }
 
     private var editingBody: some View {
