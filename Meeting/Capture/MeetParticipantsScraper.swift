@@ -120,26 +120,67 @@ enum MeetParticipantsScraper {
         }
     }
 
-    /// Permissive but defensive — accepts multi-word strings that include
-    /// at least one capitalized word; rejects emails, URLs, button text,
-    /// and obvious instructional copy. Tuned against a 27-person Meet in
-    /// 2026-04-30 where a YouTube tab in another window held similar
-    /// `AXStaticText` nodes that needed to be suppressed.
+    /// Permissive but defensive — accepts 2-3 word strings that include at
+    /// least one capitalized word; rejects emails, URLs, button text,
+    /// status strings ("X joined", "Y has left"), chat snippets, stat
+    /// readouts, and presenting badges. Tuned against a 42-person Meet on
+    /// 2026-05-05 where the activity panel and chat sidebar leaked dozens
+    /// of `AXStaticText` nodes ("Added 😯 reaction.", "Memory usage: 395 MB",
+    /// "Drink Sirichai (Presenting)", "พี่ต่อเอา Template ไหนดีครับ").
     static func looksLikeParticipantName(_ s: String) -> Bool {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.count >= 3, t.count <= 60 else { return false }
-        if t.contains("@") || t.contains("/") || t.contains("://") || t.contains(".com") {
+
+        // Punctuation that real display names don't carry but UI strings,
+        // chat messages, and stat readouts almost always do.
+        let bannedChars: Set<Character> = [
+            "@", "/", ":", "(", ")", "+", ".", ",", "?", "!",
+        ]
+        if t.contains(where: bannedChars.contains) { return false }
+        // " - " separator (e.g. "Mobile team workload - Google Sheets").
+        // Single hyphens stay allowed so names like "Anne-Marie" survive.
+        if t.contains(" - ") { return false }
+
+        // Digits — names don't have them.
+        if t.unicodeScalars.contains(where: CharacterSet.decimalDigits.contains) {
             return false
         }
+        // Emoji / pictograph symbols. Thai and CJK letters are *not* in
+        // `.symbols`, so this only strips the emoji-bearing chat strings.
+        if t.unicodeScalars.contains(where: CharacterSet.symbols.contains) {
+            return false
+        }
+
+        // Multi-word ALL-CAPS phrases ("HISTORY IS ON", "SPACE UPDATE").
+        if t.contains(" "), t == t.uppercased() { return false }
+
         let lc = t.lowercased()
         let badPrefixes = [
-            "turn ", "leave ", "open ", "close ", "show ", "hide ",
-            "mute ", "more ", "pin ", "remove ", "your ", "this ",
-            "click ", "tap ", "send ", "view ", "raise ", "lower ",
-            "join ", "switch ",
+            "added ", "audio ", "click ", "close ", "getting ",
+            "hide ", "history ", "join ", "leave ", "lower ",
+            "memory ", "message ", "messages ", "mobile ", "mobility ",
+            "more ", "mute ", "now ", "open ", "pin ", "raise ",
+            "remove ", "send ", "show ", "space ", "switch ",
+            "tap ", "this ", "turn ", "view ", "you ", "you'",
+            "your ", "zoom ",
         ]
         if badPrefixes.contains(where: lc.hasPrefix) { return false }
-        return t.split(separator: " ").contains { $0.first?.isUppercase == true }
+
+        // Status / chat verbs that follow a name in a single AXStaticText
+        // value, so we can't filter them out via prefix alone.
+        let badSubstrings = [
+            " joined", " left ", " has left", " reacted",
+            " sent", " saved", " presenting",
+        ]
+        if badSubstrings.contains(where: lc.contains) { return false }
+
+        // The team this app is built for uses 2-word First-Last Meet
+        // display names exclusively. Anything else (single words, 3+
+        // word strings, chat fragments like "Max สองคนละ iOS") is noise.
+        let parts = t.split(separator: " ")
+        guard parts.count == 2 else { return false }
+
+        return parts.contains { $0.first?.isUppercase == true }
     }
 
     // MARK: - AX helpers

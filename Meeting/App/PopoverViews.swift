@@ -291,6 +291,7 @@ struct PopoverRecordingView: View {
     let started: Date
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var recording: RecordingSession
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -304,7 +305,14 @@ struct PopoverRecordingView: View {
                 Text(started, style: .timer)
                     .font(.mono(13, weight: .semibold))
                     .foregroundStyle(Color.textPrimary)
+                GlassIconButton(systemImage: "books.vertical", size: 24) {
+                    appState.route = .library
+                    openWindow(id: "main")
+                }
+                .help("Open Library")
             }
+
+            BackgroundJobsCard()
 
             if let event = recording.currentEvent {
                 HStack(spacing: 6) {

@@ -732,10 +732,49 @@ private struct SpeakersPanel: View {
     }
 
     private func lookupAttendee(id: String) -> CalendarAttendee? {
-        guard let event = meeting.calendarEvent else { return nil }
-        if let organizer = event.organizer, organizer.id == id { return organizer }
-        return event.attendees.first { $0.id == id }
+        attendeePool(for: meeting).first { $0.id == id }
     }
+}
+
+/// Unified attendee pool used by the Attendees panel (drag source) and
+/// the Speakers panel's drop handler. Combines calendar invitees with
+/// Meet-scraped display names so both lists feed the same drag/drop flow.
+///
+/// Dedupe is by case-insensitive `displayName` — Meet hands us "First
+/// Last" while calendar often gives only `local@host.com` as the
+/// displayName, so the lists rarely collide and most Meet names land
+/// as additional pills. Meet-only entries are synthesized with
+/// `email = nil` and `id = "name:<DisplayName>"` so the drop handler
+/// can write the same identity-bundle shape to speakers.json.
+fileprivate func attendeePool(for meeting: MeetingRecord) -> [CalendarAttendee] {
+    var calendarPool: [CalendarAttendee] = []
+    if let event = meeting.calendarEvent {
+        if let organizer = event.organizer { calendarPool.append(organizer) }
+        calendarPool.append(contentsOf: event.attendees)
+    }
+    var seenIDs = Set<String>()
+    var deduped: [CalendarAttendee] = []
+    for att in calendarPool {
+        if att.isMe { continue }
+        if seenIDs.insert(att.id).inserted { deduped.append(att) }
+    }
+
+    let calendarNamesLC = Set(deduped.map { $0.displayName.lowercased() })
+    for name in meeting.meetParticipants {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !calendarNamesLC.contains(trimmed.lowercased()) else { continue }
+        let synthesized = CalendarAttendee(
+            displayName: trimmed,
+            email: nil,
+            isMe: false,
+            role: nil
+        )
+        if seenIDs.insert(synthesized.id).inserted {
+            deduped.append(synthesized)
+        }
+    }
+    return deduped
 }
 
 private struct SpeakerRow: View {
@@ -890,15 +929,7 @@ private struct AttendeesPanel: View {
     @AppStorage("transcript.viewer.expand.attendees") private var isExpanded: Bool = true
 
     private var pool: [CalendarAttendee] {
-        guard let event = meeting.calendarEvent else { return [] }
-        var out: [CalendarAttendee] = []
-        if let organizer = event.organizer { out.append(organizer) }
-        out.append(contentsOf: event.attendees)
-        var seen = Set<String>()
-        return out.filter { att in
-            guard !att.isMe else { return false }
-            return seen.insert(att.id).inserted
-        }
+        attendeePool(for: meeting)
     }
 
     /// Set of `CalendarAttendee.id` values already mapped to a
@@ -1068,10 +1099,21 @@ private struct TranscriptScrollPane: View {
     let search: String
     @ObservedObject var playerModel: VideoPlayerModel
 
+    /// Cached active segment id. Updated only when playback crosses a
+    /// segment boundary, so the SegmentRow `isActive` parameter is stable
+    /// across the 5Hz currentTime ticks and SwiftUI doesn't re-diff every
+    /// visible row on every tick.
+    @State private var activeID: TranscriptSegment.ID?
+
     var body: some View {
+        // Action-item lookup is rebuilt per body, but with binary search
+        // it's O(items · log segments) — well under a millisecond at
+        // realistic sizes (≤ ~50 items, a few thousand segments).
+        let actionItemMap = actionItemMap()
+
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 14) {
                     heroBlock
 
                     ForEach(transcript.segments) { segment in
@@ -1079,8 +1121,8 @@ private struct TranscriptScrollPane: View {
                             segment: segment,
                             speakers: meeting.speakers,
                             searchQuery: search,
-                            actionItem: actionItem(for: segment),
-                            isActive: activeSegmentID == segment.id,
+                            actionItem: actionItemMap[segment.id],
+                            isActive: activeID == segment.id,
                             onSeek: { playerModel.seek(to: segment.start) },
                             onCommitEdit: { newText in
                                 transcript = transcript.updatingSegment(id: segment.id, text: newText)
@@ -1092,7 +1134,10 @@ private struct TranscriptScrollPane: View {
                 .padding(.horizontal, 28)
                 .padding(.vertical, 20)
             }
-            .onChange(of: activeSegmentID) { _, newID in
+            .onReceive(playerModel.$currentTime) { time in
+                let newID = activeSegmentID(at: time)
+                guard newID != activeID else { return }
+                activeID = newID
                 // Only chase playback while the player is moving — if the
                 // user paused to read a different part of the transcript,
                 // don't yank them back to the playhead.
@@ -1104,31 +1149,64 @@ private struct TranscriptScrollPane: View {
         }
     }
 
-    /// The segment whose [start, end) currently contains `currentTime`.
-    /// Falls back to the most recently started segment when between
-    /// two segments (e.g. silence) so the highlight doesn't blink off.
-    private var activeSegmentID: TranscriptSegment.ID? {
-        let now = playerModel.currentTime
+    /// Binary-search the segment array (sorted by start) for the one whose
+    /// [start, end) contains `time`. Falls back to the rightmost segment
+    /// with `start <= time` so the highlight doesn't blink off during
+    /// silence between segments. O(log n) per playback tick instead of
+    /// the O(n²) "scan-per-row × rows" the previous computed-property
+    /// approach degraded into for long meetings.
+    private func activeSegmentID(at time: TimeInterval) -> TranscriptSegment.ID? {
         let segments = transcript.segments
         guard !segments.isEmpty else { return nil }
-        if let exact = segments.first(where: { $0.start <= now && now < $0.end }) {
-            return exact.id
+        var lo = 0
+        var hi = segments.count - 1
+        var best = -1
+        while lo <= hi {
+            let mid = (lo &+ hi) >> 1
+            if segments[mid].start <= time {
+                best = mid
+                lo = mid &+ 1
+            } else {
+                hi = mid &- 1
+            }
         }
-        // No exact hit (gap between segments) → highlight the last one
-        // that has already started. `segments` is sorted by start time
-        // by `TranscriptMerger.merge`, so the rightmost match wins.
-        return segments.last(where: { $0.start <= now })?.id
+        guard best >= 0 else { return nil }
+        return segments[best].id
     }
 
-    /// Match action items (from cached summary.json) to segments by
-    /// timestamp. An action item highlights the segment containing its
-    /// parsed timestamp; ties are resolved by closest-start-time.
-    private func actionItem(for segment: TranscriptSegment) -> ActionItem? {
-        guard let items = meeting.summary?.actionItems else { return nil }
-        return items.first { item in
-            guard let t = item.timestampSeconds else { return false }
-            return t >= segment.start && t < segment.end
+    /// Pre-compute a `[segment.id: action-item]` lookup. Each action item's
+    /// timestamp is binary-searched against segment starts so we don't pay
+    /// O(items · segments) on every body re-render.
+    private func actionItemMap() -> [TranscriptSegment.ID: ActionItem] {
+        guard let items = meeting.summary?.actionItems, !items.isEmpty else {
+            return [:]
         }
+        let segments = transcript.segments
+        guard !segments.isEmpty else { return [:] }
+        var map: [TranscriptSegment.ID: ActionItem] = [:]
+        for item in items {
+            guard let t = item.timestampSeconds else { continue }
+            // Find the rightmost segment with start <= t, then verify
+            // t < end. Same shape as activeSegmentID(at:).
+            var lo = 0
+            var hi = segments.count - 1
+            var best = -1
+            while lo <= hi {
+                let mid = (lo &+ hi) >> 1
+                if segments[mid].start <= t {
+                    best = mid
+                    lo = mid &+ 1
+                } else {
+                    hi = mid &- 1
+                }
+            }
+            guard best >= 0 else { continue }
+            let seg = segments[best]
+            if t < seg.end {
+                map[seg.id] = item
+            }
+        }
+        return map
     }
 
     @ViewBuilder
