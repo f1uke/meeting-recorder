@@ -94,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // Placeholder icon shown until `attach(state:)` swaps in the
             // SwiftUI MenuBarLabel host view.
             button.image = NSImage(
-                systemSymbolName: "mic.fill",
+                systemSymbolName: "captions.bubble.fill",
                 accessibilityDescription: "Meeting"
             )
             button.action = #selector(handleStatusClick(_:))

@@ -42,7 +42,7 @@ struct MenuBarLabel: View {
             .font(.system(size: 13))
 
         default:
-            Image(systemName: "mic.fill")
+            Image(systemName: "captions.bubble.fill")
                 .font(.system(size: 13))
         }
     }
