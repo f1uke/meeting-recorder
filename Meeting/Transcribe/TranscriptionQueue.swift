@@ -21,6 +21,11 @@ struct TranscriptionJob: Identifiable, Sendable {
     var startedAt: Date?
     var finishedAt: Date?
     var state: JobState
+    /// Side-channel detail emitted by long-running providers (currently
+    /// the Gemini batch poll loop). Independent of `state`'s stage so the
+    /// UI can render "last check 12s ago — RUNNING" while the progress
+    /// bar is pinned. Cleared on stage transitions.
+    var lastStatus: TranscriptionSession.StageStatus?
 
     enum JobState: Equatable, Sendable {
         case queued
@@ -413,6 +418,11 @@ final class TranscriptionQueue: ObservableObject {
                 Task { @MainActor in
                     self?.publishStage(jobID: jobID, stage: .transcribingBatch, fraction: fraction)
                 }
+            },
+            status: { [weak self] status in
+                Task { @MainActor in
+                    self?.publishStatus(jobID: jobID, status: status)
+                }
             }
         )
         guard let mic = results[micURL], let output = results[outputURL] else {
@@ -453,8 +463,22 @@ final class TranscriptionQueue: ObservableObject {
                clamped < 1 {
                 return
             }
+            // Stage moved on — drop any stage-specific status detail so
+            // the UI doesn't show e.g. "Polling Gemini batch" while the
+            // pipeline is already merging.
+            if currentStage != stage {
+                jobs[idx].lastStatus = nil
+            }
         }
         jobs[idx].state = .running(stage: stage, overall: newOverall)
+    }
+
+    /// Republish the latest provider-side status for a running job. No
+    /// rate-limiting — providers are expected to emit at most every few
+    /// seconds (Gemini's poll loop is the only caller today).
+    private func publishStatus(jobID: TranscriptionJob.ID, status: TranscriptionSession.StageStatus) {
+        guard let idx = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[idx].lastStatus = status
     }
 
     private func markDone(jobID: TranscriptionJob.ID) {

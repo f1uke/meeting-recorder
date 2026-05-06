@@ -725,11 +725,13 @@ actor GeminiProvider: TranscriptionProvider {
 
     func transcribeBatch(
         streams: [TranscribeStream],
-        progress: (@Sendable (Double) -> Void)?
+        progress: (@Sendable (Double) -> Void)?,
+        status: (@Sendable (TranscriptionSession.StageStatus) -> Void)?
     ) async throws -> [URL: TranscriptResult] {
         guard useBatchAPI else {
             // Sync mode — sequential per stream. Same shape as the protocol
-            // extension default but keeps everything in one place.
+            // extension default but keeps everything in one place. No
+            // useful status to emit; the slow path is the batch poll loop.
             var results: [URL: TranscriptResult] = [:]
             let total = Double(max(streams.count, 1))
             for (i, stream) in streams.enumerated() {
@@ -745,7 +747,11 @@ actor GeminiProvider: TranscriptionProvider {
             }
             return results
         }
-        return try await transcribeCombinedBatch(streams: streams, onProgress: progress)
+        return try await transcribeCombinedBatch(
+            streams: streams,
+            onProgress: progress,
+            onStatus: status
+        )
     }
 
     /// Pool every stream's chunks into one batch job. Uploads run with no
@@ -754,7 +760,8 @@ actor GeminiProvider: TranscriptionProvider {
     /// reroute results back to the right stream after polling.
     private func transcribeCombinedBatch(
         streams: [TranscribeStream],
-        onProgress: (@Sendable (Double) -> Void)?
+        onProgress: (@Sendable (Double) -> Void)?,
+        onStatus: (@Sendable (TranscriptionSession.StageStatus) -> Void)?
     ) async throws -> [URL: TranscriptResult] {
         guard !apiKey.isEmpty else {
             throw TranscriptionError.modelLoadFailed(
@@ -894,9 +901,13 @@ actor GeminiProvider: TranscriptionProvider {
               batchName, totalChunks, streams.count)
 
         // (5) Poll until terminal.
-        let responsesFileName = try await pollBatch(name: batchName) { fraction in
-            onProgress?(submitEnd + fraction * (pollEnd - submitEnd))
-        }
+        let responsesFileName = try await pollBatch(
+            name: batchName,
+            onProgress: { fraction in
+                onProgress?(submitEnd + fraction * (pollEnd - submitEnd))
+            },
+            onStatus: onStatus
+        )
         onProgress?(pollEnd)
 
         // (6) Download responses.
@@ -1199,10 +1210,17 @@ actor GeminiProvider: TranscriptionProvider {
         NSLog("[Meeting/Transcribe] Gemini batch submitted: %@", batchName)
 
         // (4) Poll until terminal state. Caller's band maps elapsed time
-        // → 16...94% so the bar still moves while we wait.
-        let responsesFileName = try await pollBatch(name: batchName) { fraction in
-            onProgress(submitEnd + fraction * (pollEnd - submitEnd))
-        }
+        // → 16...94% so the bar still moves while we wait. The
+        // single-stream entry has no UI surface for status, so onStatus
+        // is left nil — only the combined multi-stream path surfaces the
+        // poll status to the queue.
+        let responsesFileName = try await pollBatch(
+            name: batchName,
+            onProgress: { fraction in
+                onProgress(submitEnd + fraction * (pollEnd - submitEnd))
+            },
+            onStatus: nil
+        )
         onProgress(pollEnd)
 
         // (5) Download responses file. Best-effort delete after parsing —
@@ -1356,7 +1374,8 @@ actor GeminiProvider: TranscriptionProvider {
     /// fast finishes without spamming a slow run.
     private nonisolated func pollBatch(
         name: String,
-        onProgress: @escaping @Sendable (Double) -> Void
+        onProgress: @escaping @Sendable (Double) -> Void,
+        onStatus: (@Sendable (TranscriptionSession.StageStatus) -> Void)?
     ) async throws -> String {
         let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(name)")!
         // Expected total wait used purely to drive the progress bar; the
@@ -1365,6 +1384,7 @@ actor GeminiProvider: TranscriptionProvider {
         let expectedSeconds: TimeInterval = 600
         let maxWait: TimeInterval = 24 * 60 * 60  // batch SLA
         let started = Date()
+        var pollCount = 0
 
         while Date().timeIntervalSince(started) < maxWait {
             try Task.checkCancellation()
@@ -1372,6 +1392,9 @@ actor GeminiProvider: TranscriptionProvider {
             var req = URLRequest(url: url)
             req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
             let (data, response) = try await urlSession.data(for: req)
+            pollCount += 1
+            let now = Date()
+            let elapsed = now.timeIntervalSince(started)
 
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
                 let snapshot = parseBatchSnapshot(data: data)
@@ -1379,6 +1402,10 @@ actor GeminiProvider: TranscriptionProvider {
                     if state.hasSuffix("SUCCEEDED") {
                         if let file = snapshot.responsesFile {
                             onProgress(1.0)
+                            onStatus?(TranscriptionSession.StageStatus(
+                                updatedAt: now,
+                                summary: "Gemini batch SUCCEEDED — fetching results"
+                            ))
                             return file
                         }
                         throw TranscriptionError.providerFailed(self.name, underlying: GeminiError.batchFailed(
@@ -1391,12 +1418,25 @@ actor GeminiProvider: TranscriptionProvider {
                             "batch terminal state \(state): \(detail)"
                         ))
                     }
+                    onStatus?(TranscriptionSession.StageStatus(
+                        updatedAt: now,
+                        summary: "Gemini batch \(humanizeBatchState(state)) · checked \(pollCount)× over \(formatElapsed(elapsed))"
+                    ))
+                } else {
+                    onStatus?(TranscriptionSession.StageStatus(
+                        updatedAt: now,
+                        summary: "Gemini batch — no state yet · checked \(pollCount)× over \(formatElapsed(elapsed))"
+                    ))
                 }
+            } else if let http = response as? HTTPURLResponse {
+                onStatus?(TranscriptionSession.StageStatus(
+                    updatedAt: now,
+                    summary: "Gemini batch poll got HTTP \(http.statusCode) · checked \(pollCount)× over \(formatElapsed(elapsed))"
+                ))
             }
 
             // Linear creep: 0...1 over `expectedSeconds`, capped at 0.98 so
             // the bar isn't pinned at 100% if the run takes longer.
-            let elapsed = Date().timeIntervalSince(started)
             onProgress(min(0.98, elapsed / expectedSeconds))
 
             // Tight cadence early (catch fast finishes), slower cadence
@@ -1407,6 +1447,27 @@ actor GeminiProvider: TranscriptionProvider {
         throw TranscriptionError.providerFailed(self.name, underlying: GeminiError.batchFailed(
             "batch did not finish within 24h SLA"
         ))
+    }
+
+    /// Trim Google's `BATCH_STATE_RUNNING` / `BATCH_STATE_PENDING` etc.
+    /// down to the readable suffix for status messages.
+    private nonisolated func humanizeBatchState(_ state: String) -> String {
+        if let suffix = state.split(separator: "_").last {
+            return String(suffix)
+        }
+        return state
+    }
+
+    /// Compact "1h 6m" / "8m 32s" / "42s" style for status messages —
+    /// matches the duration phrasing in the rest of the app.
+    private nonisolated func formatElapsed(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let h = total / 3600
+        let m = (total / 60) % 60
+        let s = total % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
     }
 
     private struct BatchSnapshot {

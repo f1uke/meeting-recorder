@@ -136,9 +136,15 @@ protocol TranscriptionProvider: Sendable {
     /// every stream's chunks go into one batch job) override this directly.
     /// Returns a dictionary keyed by `audioURL` so callers don't need to
     /// reason about input ordering.
+    ///
+    /// `status` (optional) is a richer side-channel for slow providers to
+    /// surface what's happening between progress ticks — e.g. "Polling
+    /// Gemini batch — RUNNING". Best-effort; providers that can't say
+    /// anything useful simply never call it.
     func transcribeBatch(
         streams: [TranscribeStream],
-        progress: (@Sendable (Double) -> Void)?
+        progress: (@Sendable (Double) -> Void)?,
+        status: (@Sendable (TranscriptionSession.StageStatus) -> Void)?
     ) async throws -> [URL: TranscriptResult]
     /// Release any loaded model weights from memory. Called by the session
     /// after a transcript completes so the multi-GB CoreML buffers don't sit
@@ -154,10 +160,12 @@ extension TranscriptionProvider {
 
     /// Default `transcribeBatch` — sequential `transcribe()` per stream.
     /// Slices the caller's progress band evenly across streams so the bar
-    /// keeps moving regardless of stream count.
+    /// keeps moving regardless of stream count. The default impl has
+    /// nothing useful to say about live status, so it ignores `status`.
     func transcribeBatch(
         streams: [TranscribeStream],
-        progress: (@Sendable (Double) -> Void)?
+        progress: (@Sendable (Double) -> Void)?,
+        status: (@Sendable (TranscriptionSession.StageStatus) -> Void)?
     ) async throws -> [URL: TranscriptResult] {
         var results: [URL: TranscriptResult] = [:]
         let total = Double(max(streams.count, 1))

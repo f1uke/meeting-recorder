@@ -51,4 +51,31 @@ enum TranscriptionSession {
             .loadingModels, .transcribingMic, .transcribingOutput, .merging, .writing,
         ]
     }
+
+    /// Optional richer status emitted by long-running providers (notably
+    /// the Gemini Batch poll loop, which spends 90% of wall time waiting
+    /// on Google's backend without the progress fraction moving). UI
+    /// renders the summary plus a relative "last check Xs ago" derived
+    /// from `updatedAt`. Sibling to `Stage` rather than embedded so
+    /// providers can emit it without needing to know the stage.
+    struct StageStatus: Sendable, Equatable {
+        let updatedAt: Date
+        let summary: String
+
+        /// "12s ago" / "2m ago" / "1h 4m ago" — short, monotonic so a
+        /// TimelineView re-render every second produces a smooth ticker.
+        /// Returns "just now" while the gap rounds to under one second.
+        func relativeAgo(now: Date) -> String {
+            let delta = max(0, now.timeIntervalSince(updatedAt))
+            let total = Int(delta)
+            if total < 1 { return "just now" }
+            if total < 60 { return "\(total)s ago" }
+            let m = total / 60
+            let s = total % 60
+            if m < 60 { return s == 0 ? "\(m)m ago" : "\(m)m \(s)s ago" }
+            let h = m / 60
+            let mm = m % 60
+            return mm == 0 ? "\(h)h ago" : "\(h)h \(mm)m ago"
+        }
+    }
 }

@@ -492,6 +492,14 @@ struct BackgroundJobsCard: View {
                     .truncationMode(.middle)
                 ProgressBar(value: progressValue(for: running))
                     .frame(height: 4)
+                if let status = running.lastStatus {
+                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                        Text("\(status.summary) · last check \(status.relativeAgo(now: ctx.date))")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.textFaint)
+                            .lineLimit(2)
+                    }
+                }
                 if queue.queuedCount > 0 {
                     Text("\(queue.queuedCount) queued")
                         .font(.system(size: 10))

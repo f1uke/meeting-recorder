@@ -1422,6 +1422,15 @@ private struct JobStatusBanner: View {
                     Text("\(Int((overall * 100).rounded()))% · \(job.providerName) (\(job.modelName))")
                         .font(.mono(11))
                         .foregroundStyle(Color.textDim)
+                    if let status = job.lastStatus {
+                        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                            Text("\(status.summary) · last check \(status.relativeAgo(now: ctx.date))")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.textFaint)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                        }
+                    }
                 }
                 Spacer()
                 Button("Cancel") { queue.cancel(job.id) }
