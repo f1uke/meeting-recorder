@@ -361,7 +361,7 @@ actor OpenAIProvider: TranscriptionProvider {
     private nonisolated func formatPrompt() -> String {
         guard !glossary.isEmpty else { return "" }
         if modelName.hasPrefix("gpt-4o") {
-            return "This is a software development meeting recorded in Thai with frequent English technical terms. Topics may include: \(glossary)."
+            return "This is an iOS/Android mobile development meeting at Finnomena recorded in Thai with frequent English technical terms. Topics may include: \(glossary)."
         }
         return glossary
     }

@@ -696,7 +696,7 @@ actor GeminiProvider: TranscriptionProvider {
         case .some(let other): langHint = "The audio is primarily \(other), possibly mixed with English technical terms."
         }
         return """
-        You transcribe meeting audio for a software development team.
+        You transcribe meeting audio for an iOS/Android mobile development team at Finnomena.
         \(langHint)
 
         Rules:

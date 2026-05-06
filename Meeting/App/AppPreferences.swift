@@ -401,10 +401,13 @@ enum TranscriptionEngine: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Glossary primed into cloud providers' system instruction. Bias toward
-    /// dev / meeting vocabulary that gets butchered when Thai-leaning
-    /// transcription stumbles on inline English. User can edit in Settings.
+    /// the iOS/Android mobile-dev vocabulary at Finnomena that gets butchered
+    /// when Thai-leaning transcription stumbles on inline English — squad
+    /// names, app/repo identifiers, ticket prefixes, mobile stack, auth +
+    /// KMP/CMP terms, third-party tooling, and Finnomena product/domain
+    /// nouns. User can edit in Settings.
     static let defaultGlossary: String =
-        "Kubernetes, Docker, gRPC, REST, API, microservice, deployment, deploy, staging, production, prod, sprint, retrospective, retro, standup, kanban, GitLab, Jira, MR, PR, pipeline, CI, CD, hotfix, rollback, schema, migration, Postgres, Redis, queue, async, repository, repo, branch, merge, rebase, commit, LLM, embedding, prompt, OAuth, JWT, webhook, latency, throughput, SLA, SLO"
+        "Finnomena, Mobility, STARLIGHT, FRONTIER, Scrum of Scrum, sprint, grooming, pre-grooming, retro, retrospective, standup, check-in, check-out, postmortem, smoke test, hotfix, rollback, release, MR, PR, code review, QA, deep link, data tagging, data tracking, observability, SAST, BFM, gateway, nter-ios-app, advisor-ios-app, nter-android-app, finnomena-chat, Valhalla, DataTaggingKMP, MOBILITY, STAR, TECHREQ, iOS, Android, Swift, SwiftUI, UIKit, UICollectionView, Xcode, Simulator, Kotlin, KMP, Compose, CMP, UniFFI, Gobley, Rust, Liquid Glass, AppTrackingTransparency, ATT, Kratos, Hydra, OAuth2, passkey, AASA, DAL, MFA, biometric, keychain, Pitch Lock, social login, Fastlane, Fork, Ghostty, GitLab, MobSF, Semgrep, Tailscale, Sentry, Crashlytics, Firebase, Braze, Unleash, Codex, Claude Code, Cursor, BrowserStack, R.swift, Mermaid, port, portfolio, fund, term fund, IPO, SET, NAV, advisor, KYC, onboarding, e-coupon, FPick, F4A, CMS, segregate account, announcement, content card, push notification, Notification Hub, Noti Banner, Noti Hub, Noti Center, bell counter, MFA on Port, Matrix, CallKit"
 }
 
 // MARK: - Gemini model
