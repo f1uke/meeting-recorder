@@ -278,8 +278,7 @@ private struct GeneralTab: View {
     }
 
     private var meetingsFolder: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/Meetings")
+        AppPreferences.shared.meetingsFolderURL
     }
 
     private func testRecordingSavedToast() {
@@ -1317,41 +1316,37 @@ private struct FlowChips: View {
 // =============================================================================
 
 private struct StorageTab: View {
+    @ObservedObject private var prefs = AppPreferences.shared
     @EnvironmentObject private var library: MeetingsLibrary
     @State private var usage = StorageUsage(usedBytes: 0, freeBytes: 0)
-
-    private var meetingsFolder: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Meetings", isDirectory: true)
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             DetailHeader(
                 title: "Storage",
-                subtitle: "Where recordings live on disk."
+                subtitle: "Pick where recordings are saved on disk and where Markdown notes are exported."
             )
 
-            SettingsSection(label: "Meetings folder") {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "folder")
-                            .foregroundStyle(Color.textDim)
-                        Text(meetingsFolder.path)
-                            .font(.mono(11))
-                            .foregroundStyle(Color.textPrimary)
-                            .textSelection(.enabled)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                        Spacer()
-                        Button("Reveal") {
-                            NSWorkspace.shared.activateFileViewerSelecting([meetingsFolder])
-                        }
-                        .controlSize(.small)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+            SettingsSection(label: "Recordings folder") {
+                FolderPickerRow(
+                    description: "New recordings save here as timestamped subfolders. Existing recordings stay in the previous location when you change this — move them yourself if you want them re-indexed.",
+                    path: Binding(
+                        get: { prefs.meetingsFolder },
+                        set: { prefs.meetingsFolder = $0 }
+                    ),
+                    defaultPath: AppPreferences.defaultMeetingsFolder
+                )
+            }
+
+            SettingsSection(label: "Meeting notes folder") {
+                FolderPickerRow(
+                    description: "Where “Generate Note” writes the per-meeting Markdown file. Designed for an Obsidian vault. Filename format: yyyy-MM-dd-<title-slug>.md.",
+                    path: Binding(
+                        get: { prefs.meetingNotesFolder },
+                        set: { prefs.meetingNotesFolder = $0 }
+                    ),
+                    defaultPath: AppPreferences.defaultMeetingNotesFolder
+                )
             }
 
             SettingsSection(label: "Disk usage") {
@@ -1612,6 +1607,71 @@ private struct LabeledRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+}
+
+private struct FolderPickerRow: View {
+    let description: String?
+    @Binding var path: String
+    let defaultPath: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let description {
+                Text(description)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.textDim)
+                Text(path)
+                    .font(.mono(11))
+                    .foregroundStyle(Color.textPrimary)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Choose…", action: choose)
+                    .controlSize(.small)
+                Button("Reveal", action: reveal)
+                    .controlSize(.small)
+            }
+            if path != defaultPath {
+                HStack {
+                    Spacer()
+                    Button("Reset to default") {
+                        path = defaultPath
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.brandAccent)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        panel.prompt = "Choose"
+        if panel.runModal() == .OK, let url = panel.url {
+            path = url.path(percentEncoded: false)
+        }
+    }
+
+    private func reveal() {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
 

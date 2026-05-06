@@ -26,6 +26,8 @@ final class AppState: ObservableObject {
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
 
+    private var cancellables: Set<AnyCancellable> = []
+
     /// Which view the unified main window is showing. Library on launch;
     /// switches to `.transcript` when the user opens a meeting from the
     /// detail pane or a popover row, and back via the transcript view's
@@ -76,8 +78,25 @@ final class AppState: ObservableObject {
             // wait one tick to give it a chance to populate first; the
             // queue scan only relies on disk markers, not the in-memory
             // index, so the order isn't strictly required for correctness.
-            self.queue.scanAndEnqueueOrphans(meetingsRoot: Self.meetingsRoot)
+            self.queue.scanAndEnqueueOrphans(meetingsRoot: AppPreferences.shared.meetingsFolderURL)
         }
+
+        // Keep the library pointed at whatever folder Settings is showing
+        // — when the user picks a new meetings root the watcher swaps and
+        // the list refreshes immediately. dropFirst skips the redundant
+        // initial publish, since the library was already constructed with
+        // the current value.
+        AppPreferences.shared.$meetingsFolder
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] path in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let url = URL(fileURLWithPath: path, isDirectory: true)
+                    self.library.setMeetingsRoot(url)
+                }
+            }
+            .store(in: &cancellables)
     }
 
     /// Hook for Settings change notifications. Each new transcription job
@@ -118,12 +137,6 @@ final class AppState: ObservableObject {
             )
             return (provider: p, name: "OpenAI", model: prefs.openaiModel.rawValue)
         }
-    }
-
-    private static var meetingsRoot: URL {
-        FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Meetings", isDirectory: true)
     }
 
     func refreshPermissions() async {

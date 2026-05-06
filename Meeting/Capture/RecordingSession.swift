@@ -80,7 +80,7 @@ final class RecordingSession: ObservableObject {
 
         let folder: URL
         do {
-            folder = try Self.createFolder()
+            folder = try Self.createFolder(in: AppPreferences.shared.meetingsFolderURL)
             NSLog("[Meeting/Session] start: created folder %@",
                   folder.path(percentEncoded: false))
         } catch {
@@ -435,14 +435,13 @@ final class RecordingSession: ObservableObject {
         state = .idle
     }
 
-    private static func createFolder() throws -> URL {
+    private static func createFolder(in baseDir: URL) throws -> URL {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let baseName = formatter.string(from: Date())
 
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let baseDir = documents.appendingPathComponent("Meetings", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
 
         var folder = baseDir.appendingPathComponent(baseName, isDirectory: true)
         var suffix = 2

@@ -127,6 +127,15 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(meetingNotesFolder, forKey: Keys.meetingNotesFolder) }
     }
 
+    /// Root folder where `RecordingSession` saves each meeting's
+    /// timestamped subfolder, and that `MeetingsLibrary` watches /
+    /// indexes. Stored as the path string. Empty string falls back to
+    /// `~/Documents/Meetings/` (the long-standing default) so the first
+    /// launch works without opening Settings.
+    @Published var meetingsFolder: String {
+        didSet { UserDefaults.standard.set(meetingsFolder, forKey: Keys.meetingsFolder) }
+    }
+
     private init() {
         let raw = UserDefaults.standard.object(forKey: Keys.expectedSpeakers) as? Int
         self.expectedSpeakerCount = ExpectedSpeakers(storageValue: raw)
@@ -172,6 +181,10 @@ final class AppPreferences: ObservableObject {
         self.meetingNotesFolder = storedNotesFolder.isEmpty
             ? Self.defaultMeetingNotesFolder
             : storedNotesFolder
+        let storedMeetingsFolder = UserDefaults.standard.string(forKey: Keys.meetingsFolder) ?? ""
+        self.meetingsFolder = storedMeetingsFolder.isEmpty
+            ? Self.defaultMeetingsFolder
+            : storedMeetingsFolder
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -194,6 +207,19 @@ final class AppPreferences: ObservableObject {
     static let defaultMeetingNotesFolder =
         ("~/Documents/Obsidian/Fluke/meeting-notes" as NSString).expandingTildeInPath
 
+    /// Default root folder for recordings — the historical
+    /// `~/Documents/Meetings/` path. Used when the stored value is
+    /// empty so existing installs keep their library exactly where
+    /// they expect it.
+    static let defaultMeetingsFolder =
+        ("~/Documents/Meetings" as NSString).expandingTildeInPath
+
+    /// `meetingsFolder` resolved to a URL with directory semantics —
+    /// what callers actually need.
+    var meetingsFolderURL: URL {
+        URL(fileURLWithPath: meetingsFolder, isDirectory: true)
+    }
+
     private enum Keys {
         static let expectedSpeakers = "dev.fluke.meeting.expectedSpeakers"
         static let micDeviceUID = "dev.fluke.meeting.micDeviceUID"
@@ -211,6 +237,7 @@ final class AppPreferences: ObservableObject {
         static let myEmails = "dev.fluke.meeting.myEmails"
         static let groupExpansions = "dev.fluke.meeting.groupExpansions"
         static let meetingNotesFolder = "dev.fluke.meeting.meetingNotesFolder"
+        static let meetingsFolder = "dev.fluke.meeting.meetingsFolder"
     }
 }
 

@@ -2,8 +2,9 @@ import Foundation
 import Combine
 import os
 
-/// In-memory index of `~/Documents/Meetings/`. Watches the parent folder
-/// with `DispatchSourceFileSystemObject` so newly-completed recordings
+/// In-memory index of the user-configurable meetings folder
+/// (`~/Documents/Meetings/` by default). Watches the parent folder with
+/// `DispatchSourceFileSystemObject` so newly-completed recordings
 /// appear in the Library list within ~one tick of finishing transcription.
 ///
 /// The Meetings folder is the canonical source of truth — `transcript.json`
@@ -17,15 +18,13 @@ final class MeetingsLibrary: ObservableObject {
     @Published var selection: MeetingRecord.ID?
     @Published var search: String = ""
 
-    private let meetingsRoot: URL
+    private(set) var meetingsRoot: URL
     private let libraryFileURL: URL
     private var overrides: LibraryOverrides
     private var fileSource: DispatchSourceFileSystemObject?
 
-    init() {
-        let documents = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask)[0]
-        self.meetingsRoot = documents.appendingPathComponent("Meetings", isDirectory: true)
+    init(meetingsRoot: URL = AppPreferences.shared.meetingsFolderURL) {
+        self.meetingsRoot = meetingsRoot
 
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -46,6 +45,21 @@ final class MeetingsLibrary: ObservableObject {
 
     deinit {
         fileSource?.cancel()
+    }
+
+    /// Re-point the library at a new on-disk root. Cancels the previous
+    /// file-system watcher, ensures the new directory exists, rescans
+    /// from disk, then starts a fresh watcher. No-op if the URL is
+    /// unchanged. Existing recordings under the previous root stay put
+    /// — moving them is left to the user.
+    func setMeetingsRoot(_ newRoot: URL) {
+        guard newRoot.standardizedFileURL != meetingsRoot.standardizedFileURL else { return }
+        fileSource?.cancel()
+        fileSource = nil
+        meetingsRoot = newRoot
+        try? FileManager.default.createDirectory(at: meetingsRoot, withIntermediateDirectories: true)
+        rescan()
+        startWatching()
     }
 
     // MARK: - Public API

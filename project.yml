@@ -45,7 +45,7 @@ targets:
         NSScreenCaptureUsageDescription: "Meeting records the window you choose so you can review meetings later."
         NSMicrophoneUsageDescription: "Meeting records your microphone so your voice is included in transcripts."
         NSAudioCaptureUsageDescription: "Meeting captures audio from the meeting app you choose so participants' voices can be transcribed separately."
-        NSDocumentsFolderUsageDescription: "Meeting saves recordings and transcripts to ~/Documents/Meetings/."
+        NSDocumentsFolderUsageDescription: "Meeting saves recordings and transcripts to the folder you pick in Settings (default: ~/Documents/Meetings/)."
         NSCalendarsFullAccessUsageDescription: "Meeting reads calendar events so it can pre-fill meeting titles, attendees, and remind you when a scheduled meeting is about to start. Calendar data stays on your Mac — it is never uploaded."
         NSCalendarsUsageDescription: "Meeting reads calendar events to pre-fill meeting titles and attendees. Calendar data stays on your Mac."
         NSAppleEventsUsageDescription: "Meeting reads the front-tab URL of your browser during a recording so links you visit can be folded into the meeting summary. Browser data stays on your Mac unless you generate the AI summary."
