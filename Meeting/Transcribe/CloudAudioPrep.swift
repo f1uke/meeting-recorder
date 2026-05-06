@@ -73,6 +73,23 @@ enum CloudAudioPrep {
     /// stray-flick case the user reported.
     static let minVoicedDuration: TimeInterval = 2.0
 
+    /// How far **before** the target chunk boundary to look for a natural
+    /// pause. Search is one-sided (backward only): every cloud provider
+    /// has its `chunkDuration` tuned to a per-chunk token budget — Gemini
+    /// 2.5 Pro on dense Thai content trips MAX_TOKENS at ~70 s — so we
+    /// never extend a chunk past its target, only shrink it toward an
+    /// earlier pause. With 10 s, chunks land in `[chunkDuration - 10 s,
+    /// chunkDuration]`, which gives ~2 sentence pauses on average to
+    /// pick from while staying under budget.
+    static let cutSearchBackward: TimeInterval = 10
+
+    /// Result of a pause-search: the chosen cut point in absolute samples
+    /// plus whether it was actually aligned to silence (vs. fallback).
+    struct CutPoint: Equatable, Sendable {
+        let sampleIndex: Int
+        let alignedToSilence: Bool
+    }
+
     /// Decode → voiced-aware preprocess → chunk audio for upload to a
     /// cloud provider. Always loads the file into a 16k mono float array
     /// (needed anyway for the chunking step). Caller is responsible for
@@ -117,18 +134,51 @@ enum CloudAudioPrep {
         let totalDuration = Double(audio.count) / Double(sampleRate)
         var chunks: [Chunk] = []
         var skippedSilent = 0
+        var interiorBoundaries = 0   // cuts that happen inside a voiced range
+        var alignedBoundaries = 0    // subset that landed on a silence run
+        let backwardSamples = Int(cutSearchBackward * Double(sampleRate))
         // Slice each voiced range into <= chunkDuration sub-chunks so
         // every uploaded chunk maps back to the source via a single
-        // `offset`. RMS check still runs as a backstop — if the user
-        // hadn't muted but a long silent stretch is in the audio (e.g.
-        // output stream during a break), we still want to skip it.
+        // `offset`. Interior cuts get nudged onto the nearest sentence
+        // pause via findSilenceCutPoint so we don't slice a phrase mid-
+        // word at a fixed 60 s tick (model loses context on the next
+        // chunk's first segment when that happens). RMS check still runs
+        // as a backstop — if the user hadn't muted but a long silent
+        // stretch is in the audio (e.g. output stream during a break),
+        // we still want to skip it.
         for range in voiced {
             var subStart = range.start
             while subStart < range.end {
-                let subEnd = min(subStart + chunkDuration, range.end)
+                let targetEnd = min(subStart + chunkDuration, range.end)
                 let startSample = Int(subStart * Double(sampleRate))
-                let endSample = min(audio.count, Int(subEnd * Double(sampleRate)))
-                guard startSample < endSample else { break }
+                let targetSample = min(audio.count, Int(targetEnd * Double(sampleRate)))
+                guard startSample < targetSample else { break }
+
+                let endSample: Int
+                if targetEnd >= range.end - 0.001 {
+                    // Hitting the natural end of a voiced range — the
+                    // mute gate already gives us a clean boundary here,
+                    // no point searching for a smaller pause inside it.
+                    endSample = targetSample
+                } else {
+                    interiorBoundaries += 1
+                    // searchEnd = targetSample (never past it): going
+                    // beyond targetEnd would push the chunk over the
+                    // provider's per-chunk token budget. searchStart =
+                    // targetSample - backwardSamples, clamped above
+                    // startSample so the chunk always has at least 1
+                    // sample of audio.
+                    let cut = findSilenceCutPoint(
+                        audio: audio,
+                        searchStart: max(targetSample - backwardSamples, startSample + 1),
+                        searchEnd: targetSample,
+                        fallback: targetSample,
+                        sampleRate: sampleRate
+                    )
+                    endSample = cut.sampleIndex
+                    if cut.alignedToSilence { alignedBoundaries += 1 }
+                }
+
                 let chunkSamples = Array(audio[startSample..<endSample])
                 var rms: Float = 0
                 vDSP_rmsqv(chunkSamples, 1, &rms, vDSP_Length(chunkSamples.count))
@@ -141,19 +191,20 @@ enum CloudAudioPrep {
                 // separates the two without dropping real-but-quiet speech.
                 if rmsDB < -50 {
                     skippedSilent += 1
-                    subStart = subEnd
+                    subStart = Double(endSample) / Double(sampleRate)
                     continue
                 }
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("\(tempPrefix)-c\(chunks.count)-\(UUID().uuidString).wav")
                 try writeWAV(chunkSamples, sampleRate: sampleRate, to: url)
                 chunks.append(Chunk(url: url, offset: subStart, isTemp: true))
-                subStart = subEnd
+                subStart = Double(endSample) / Double(sampleRate)
             }
         }
         if chunks.count > 1 || skippedSilent > 0 {
-            NSLog("[Meeting/Transcribe] %@ %.1fs audio → %d chunks of <=%.0fs (skipped %d silent)",
-                  logTag, totalDuration, chunks.count, chunkDuration, skippedSilent)
+            NSLog("[Meeting/Transcribe] %@ %.1fs audio → %d chunks of <=%.0fs (skipped %d silent, %d/%d cuts aligned to silence)",
+                  logTag, totalDuration, chunks.count, chunkDuration,
+                  skippedSilent, alignedBoundaries, interiorBoundaries)
         }
         return chunks
     }
@@ -190,6 +241,80 @@ enum CloudAudioPrep {
             voiced.append(VoicedRange(start: cursor, end: totalDuration))
         }
         return voiced.filter { $0.duration >= minDuration }
+    }
+
+    /// Find a natural pause inside `[searchStart, searchEnd)` to use as a
+    /// chunk boundary. Returns the midpoint of the longest run of low-
+    /// energy frames when that run is at least 200 ms; otherwise returns
+    /// `fallback` (the original target boundary).
+    ///
+    /// Why -45 dBFS rather than -50: the -50 threshold elsewhere is for
+    /// "is this whole chunk silent enough to skip" — it filters out fully
+    /// muted regions. Here we're looking for a sentence-level pause
+    /// inside ongoing speech, which usually retains residual room tone /
+    /// mic self-noise sitting around -50 dBFS. -45 is permissive enough
+    /// to catch those without latching on to background hum.
+    ///
+    /// Frame size 20 ms is the standard VAD granularity — short enough
+    /// to resolve brief pauses precisely, long enough that vDSP_rmsqv
+    /// per-frame is negligible (≤2k frames per typical search window).
+    static func findSilenceCutPoint(
+        audio: [Float],
+        searchStart: Int,
+        searchEnd: Int,
+        fallback: Int,
+        sampleRate: Int = 16000
+    ) -> CutPoint {
+        let frameSize = max(1, sampleRate / 50)              // 20 ms
+        let minSilenceMs = 200
+        let minRunFrames = max(1, (minSilenceMs * sampleRate) / (1000 * frameSize))
+        let silentLinear: Float = powf(10, -45.0 / 20.0)
+
+        let lo = max(0, searchStart)
+        let hi = min(audio.count, searchEnd)
+        guard hi - lo >= frameSize else {
+            return CutPoint(sampleIndex: fallback, alignedToSilence: false)
+        }
+
+        var bestRunStart = -1
+        var bestRunFrames = 0
+        var currentStart = -1
+        var currentFrames = 0
+
+        audio.withUnsafeBufferPointer { ptr in
+            var frameStart = lo
+            while frameStart + frameSize <= hi {
+                var rms: Float = 0
+                vDSP_rmsqv(ptr.baseAddress! + frameStart, 1, &rms, vDSP_Length(frameSize))
+                let isSilent = rms < silentLinear
+                if isSilent {
+                    if currentStart < 0 {
+                        currentStart = frameStart
+                        currentFrames = 1
+                    } else {
+                        currentFrames += 1
+                    }
+                } else if currentFrames > 0 {
+                    if currentFrames > bestRunFrames {
+                        bestRunFrames = currentFrames
+                        bestRunStart = currentStart
+                    }
+                    currentStart = -1
+                    currentFrames = 0
+                }
+                frameStart += frameSize
+            }
+            if currentFrames > bestRunFrames {
+                bestRunFrames = currentFrames
+                bestRunStart = currentStart
+            }
+        }
+
+        guard bestRunFrames >= minRunFrames, bestRunStart >= 0 else {
+            return CutPoint(sampleIndex: fallback, alignedToSilence: false)
+        }
+        let midSample = bestRunStart + (bestRunFrames * frameSize) / 2
+        return CutPoint(sampleIndex: midSample, alignedToSilence: true)
     }
 
     /// Apply mic preprocessing (AEC + normalize) in place on voiced ranges
