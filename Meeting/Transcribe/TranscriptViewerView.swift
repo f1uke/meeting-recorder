@@ -819,34 +819,23 @@ private struct SpeakersPanel: View {
     }
 }
 
-/// Unified attendee pool used by the Attendees panel (drag source) and
-/// the Speakers panel's drop handler. Combines calendar invitees with
-/// Meet-scraped display names so both lists feed the same drag/drop flow.
+/// Attendee pool for the Attendees panel (drag source) and the
+/// Speakers panel's drop handler — sourced solely from the Meet AX
+/// scrape captured during the recording. Calendar invitees aren't
+/// included: in practice Meet's tile names cover everyone who
+/// actually joined, and pulling from the calendar dragged in
+/// no-shows + group-invite expansions that cluttered the panel.
 ///
-/// Dedupe is by case-insensitive `displayName` — Meet hands us "First
-/// Last" while calendar often gives only `local@host.com` as the
-/// displayName, so the lists rarely collide and most Meet names land
-/// as additional pills. Meet-only entries are synthesized with
-/// `email = nil` and `id = "name:<DisplayName>"` so the drop handler
-/// can write the same identity-bundle shape to speakers.json.
+/// Entries are synthesized as `CalendarAttendee` (with `email = nil`
+/// and `id = "name:<DisplayName>"`) so the drop handler can keep
+/// writing the same identity-bundle shape to speakers.json without
+/// branching on the source.
 fileprivate func attendeePool(for meeting: MeetingRecord) -> [CalendarAttendee] {
-    var calendarPool: [CalendarAttendee] = []
-    if let event = meeting.calendarEvent {
-        if let organizer = event.organizer { calendarPool.append(organizer) }
-        calendarPool.append(contentsOf: event.attendees)
-    }
     var seenIDs = Set<String>()
-    var deduped: [CalendarAttendee] = []
-    for att in calendarPool {
-        if att.isMe { continue }
-        if seenIDs.insert(att.id).inserted { deduped.append(att) }
-    }
-
-    let calendarNamesLC = Set(deduped.map { $0.displayName.lowercased() })
+    var pool: [CalendarAttendee] = []
     for name in meeting.meetParticipants {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              !calendarNamesLC.contains(trimmed.lowercased()) else { continue }
+        guard !trimmed.isEmpty else { continue }
         let synthesized = CalendarAttendee(
             displayName: trimmed,
             email: nil,
@@ -854,10 +843,10 @@ fileprivate func attendeePool(for meeting: MeetingRecord) -> [CalendarAttendee] 
             role: nil
         )
         if seenIDs.insert(synthesized.id).inserted {
-            deduped.append(synthesized)
+            pool.append(synthesized)
         }
     }
-    return deduped
+    return pool
 }
 
 private struct SpeakerRow: View {
@@ -1077,10 +1066,6 @@ private struct AttendeesPanel: View {
                                 attendee: att,
                                 isAssigned: isAssigned
                             )
-                            // Drag carries the attendee's stable id
-                            // (email-derived). The drop site looks up
-                            // the full record via meeting.calendarEvent
-                            // — a name string would lose email + role.
                             .draggable(att.id) {
                                 AttendeePill(attendee: att, isAssigned: false)
                             }
