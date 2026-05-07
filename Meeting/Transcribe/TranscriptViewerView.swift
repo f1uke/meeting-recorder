@@ -686,6 +686,15 @@ private struct SpeakersPanel: View {
             GlassCard(radius: 12) { Color.clear }
         }
         .onDisappear { samplePlayer.stop() }
+        // Sample player and the main video are separate AVPlayers, so a
+        // sample keeps going when the user clicks a segment to seek the
+        // video or hits play in the video chrome. Stop the sample as soon
+        // as the main player starts moving so only one stream is audible.
+        .onReceive(playerModel.$isPlaying) { isPlaying in
+            if isPlaying, samplePlayer.playingSpeaker != nil {
+                samplePlayer.stop()
+            }
+        }
     }
 
     private func speakingTime(for id: SpeakerID) -> TimeInterval {
