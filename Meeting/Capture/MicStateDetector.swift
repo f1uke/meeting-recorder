@@ -3,10 +3,10 @@ import AppKit
 import ApplicationServices
 
 /// Reports whether the user's mic is currently *active in the meeting app*
-/// — NOT whether the OS-level mic stream is open. Google Meet, Zoom, and
-/// most WebRTC clients keep the audio device open continuously and toggle
-/// a software mute internally; the OS sees the mic as in-use either way,
-/// so we have to read meeting-app UI state instead.
+/// — NOT whether the OS-level mic stream is open. Google Meet, Zoom,
+/// Discord, and most WebRTC / VoIP clients keep the audio device open
+/// continuously and toggle a software mute internally; the OS sees the mic
+/// as in-use either way, so we have to read meeting-app UI state instead.
 ///
 /// The detector polls some app-specific signal on a background queue and
 /// fires `onChange` whenever the observed state flips (with hysteresis so
@@ -18,6 +18,10 @@ import ApplicationServices
 /// since incorrectly silencing real speech is worse than transcribing a
 /// few seconds of muted audio.
 protocol MicStateDetector: AnyObject, Sendable {
+    /// Short user-facing name of the source the detector watches —
+    /// "Meet", "Discord", … — used in menu bar tooltips and logs so the
+    /// user can tell which integration is live.
+    var sourceLabel: String { get }
     /// Called from a background queue when the committed state changes.
     /// Implementations guarantee the bool reflects the current state at the
     /// moment of the call (after hysteresis).
@@ -33,29 +37,30 @@ protocol MicStateDetector: AnyObject, Sendable {
     func stop()
 }
 
-// MARK: - Google Meet (Chrome) detector
+// MARK: - Generic AX-button mic detector
 
-/// Locates Google Meet's "Turn on/off microphone" button in Chrome's
-/// accessibility tree and polls its `AXDescription`. Verified against
-/// Google Meet on 2026-04-30:
-///   - muted   → AXDescription = "Turn on microphone"
-///   - unmuted → AXDescription = "Turn off microphone"
-///
-/// The button lives ~22 levels deep inside the Chrome AXWebArea. We don't
-/// hard-code the path (it would break on any DOM reshuffle); instead we
-/// walk the tree once on startup, cache the AXUIElement reference, and
-/// re-walk only when the cached element stops returning a description
-/// (page navigation, tab switch, lobby-vs-in-meeting transition, etc.).
+/// Walks a target app's accessibility tree looking for an `AXButton` whose
+/// label/description matches a bundle-specific parser, and polls it for
+/// the user's current mute state. Used for both Google Meet (in Chrome)
+/// and Discord — the polling, hysteresis, signal-loss, and tree-walk
+/// machinery is identical; only the button identification differs.
 ///
 /// NOT @MainActor: the polling timer fires on a background dispatch queue
 /// to keep main responsive, and AX queries can take 10-100ms when the
 /// cached reference goes stale.
-final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
+final class AXMicButtonDetector: MicStateDetector, @unchecked Sendable {
+    /// Maps an AX element's title + description to a mic-active boolean.
+    /// Returns `nil` for elements that don't match the target button —
+    /// the walker uses that as the rejection signal and keeps searching.
+    typealias Parser = @Sendable (_ title: String?, _ description: String?) -> Bool?
+
+    let sourceLabel: String
     var onChange: (@Sendable (Bool) -> Void)?
     var onSignalLost: (@Sendable () -> Void)?
     var onSignalRecovered: (@Sendable () -> Void)?
 
     private let pid: pid_t
+    private let parser: Parser
     private let queue = DispatchQueue(label: "dev.fluke.meeting.mic-detector",
                                       qos: .userInitiated)
     private let pollInterval: DispatchTimeInterval = .milliseconds(200)
@@ -68,7 +73,7 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
     /// hiccups during page re-render, short enough to flag a real lost
     /// signal (background tab outside PiP) within a beat.
     private let lostThresholdPolls = 5
-    private let maxWalkDepth = 50
+    private let maxWalkDepth = 60
 
     // Background-queue-only state. `@unchecked Sendable` is honest because
     // every read/write below happens inside `queue`.
@@ -81,8 +86,10 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
     private var consecutiveNilReads = 0
     private var inLostState = false
 
-    init(pid: pid_t) {
+    init(pid: pid_t, sourceLabel: String, parser: @escaping Parser) {
         self.pid = pid
+        self.sourceLabel = sourceLabel
+        self.parser = parser
     }
 
     func start() {
@@ -129,7 +136,8 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
             consecutiveNilReads += 1
             if consecutiveNilReads >= lostThresholdPolls && !inLostState {
                 inLostState = true
-                NSLog("[Meeting/MicGate] signal lost (after %d consecutive nil reads)", consecutiveNilReads)
+                NSLog("[Meeting/MicGate] %@ signal lost (after %d consecutive nil reads)",
+                      sourceLabel, consecutiveNilReads)
                 onSignalLost?()
             }
             return
@@ -139,7 +147,7 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
         // surface the recovery before we fall through to the change check.
         if inLostState {
             inLostState = false
-            NSLog("[Meeting/MicGate] signal recovered")
+            NSLog("[Meeting/MicGate] %@ signal recovered", sourceLabel)
             onSignalRecovered?()
         }
         consecutiveNilReads = 0
@@ -165,11 +173,11 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
         }
     }
 
-    /// Returns `true` if mic is unmuted in Meet, `false` if muted, `nil`
-    /// if the button can't be located right now.
+    /// Returns `true` if mic is unmuted, `false` if muted, `nil` if the
+    /// button can't be located right now.
     private func readMicStateLocked() -> Bool? {
-        if let cached = cachedButton, let desc = readDescription(cached) {
-            return Self.parseMicState(from: desc)
+        if let cached = cachedButton, let state = readButtonState(cached) {
+            return state
         }
         cachedButton = nil
 
@@ -177,17 +185,24 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
         guard let button = walkForMicButton(app, depth: 0) else {
             if !loggedNoButton {
                 loggedNoButton = true
-                NSLog("[Meeting/MicGate] Google Meet mic button not found in pid=%d — gate stays open until user is on a Meet tab", pid)
+                NSLog("[Meeting/MicGate] %@ mic button not found in pid=%d — gate stays open until the meeting UI exposes it",
+                      sourceLabel, pid)
             }
             return nil
         }
         if loggedNoButton {
             loggedNoButton = false
-            NSLog("[Meeting/MicGate] mic button located")
+            NSLog("[Meeting/MicGate] %@ mic button located", sourceLabel)
         }
         cachedButton = button
-        guard let desc = readDescription(button) else { return nil }
-        return Self.parseMicState(from: desc)
+        return readButtonState(button)
+    }
+
+    private func readButtonState(_ element: AXUIElement) -> Bool? {
+        let title = readString(element, kAXTitleAttribute as CFString)
+        let desc = readString(element, kAXDescriptionAttribute as CFString)
+        if title == nil && desc == nil { return nil }
+        return parser(title, desc)
     }
 
     private func walkForMicButton(_ element: AXUIElement, depth: Int) -> AXUIElement? {
@@ -196,8 +211,7 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
         // Only AXButton can be the mic toggle; cheap pre-filter via role.
         if let role = readString(element, kAXRoleAttribute as CFString),
            role == kAXButtonRole as String,
-           let desc = readDescription(element),
-           Self.parseMicState(from: desc) != nil {
+           readButtonState(element) != nil {
             return element
         }
 
@@ -218,10 +232,6 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
 
     // MARK: - AX helpers
 
-    private func readDescription(_ element: AXUIElement) -> String? {
-        readString(element, kAXDescriptionAttribute as CFString)
-    }
-
     private func readString(_ element: AXUIElement, _ name: CFString) -> String? {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, name, &value) == .success else {
@@ -229,15 +239,44 @@ final class GoogleMeetAXDetector: MicStateDetector, @unchecked Sendable {
         }
         return value as? String
     }
+}
 
-    /// Maps Google Meet's AXDescription string to a mic-active boolean.
-    /// `nil` for descriptions that don't match — callers re-walk the tree.
-    static func parseMicState(from description: String) -> Bool? {
+// MARK: - Per-app parsers
+
+/// Google Meet's mic toggle (in Chrome's web view) carries the action in
+/// its AXDescription. Verified against Google Meet on 2026-04-30:
+///   - muted   → AXDescription = "Turn on microphone"
+///   - unmuted → AXDescription = "Turn off microphone"
+enum GoogleMeetMicParser {
+    static let parse: AXMicButtonDetector.Parser = { _, description in
+        guard let description else { return nil }
         let lc = description.lowercased()
-        // "Turn off microphone" → mic is currently ON (button offers to turn it off)
-        // "Turn on microphone"  → mic is currently MUTED (button offers to turn it on)
-        if lc.contains("turn off microphone") { return true }
-        if lc.contains("turn on microphone") { return false }
+        // Button label describes the action it offers, not the current state.
+        if lc.contains("turn off microphone") { return true }   // mic ON
+        if lc.contains("turn on microphone") { return false }   // mic MUTED
+        return nil
+    }
+}
+
+/// Discord's voice-panel mic toggle exposes its action via AXTitle (and
+/// occasionally AXDescription as a fallback). Discord ships separate
+/// "Mute" and "Deafen" buttons in the same panel, so we explicitly reject
+/// anything that mentions deafen to avoid latching onto the wrong one.
+///   - muted   → label starts with "Unmute"
+///   - unmuted → label starts with "Mute"
+enum DiscordMicParser {
+    static let parse: AXMicButtonDetector.Parser = { title, description in
+        for candidate in [title, description] {
+            guard let raw = candidate else { continue }
+            let lc = raw.lowercased()
+            // "Deafen" / "Undeafen" buttons live next to the mic toggle.
+            // Bail before we mistake them for the mic.
+            if lc.contains("deafen") { continue }
+            // Match on word boundaries — "unmute" must be a standalone
+            // word/prefix so phrases like "menu mute…" don't false-fire.
+            if lc.hasPrefix("unmute") || lc == "unmute" { return false }
+            if lc.hasPrefix("mute") || lc == "mute" { return true }
+        }
         return nil
     }
 }

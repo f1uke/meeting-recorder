@@ -32,10 +32,15 @@ final class RecordingSession: ObservableObject {
     /// to confirm Electron multi-helper detection is wired up.
     @Published private(set) var tapProcessCount: Int = 0
     /// Mic-gate detection state — drives the menu bar mic-gate icon.
-    /// `nil` when no gate is active for this recording (non-Chrome target,
+    /// `nil` when no gate is active for this recording (unsupported target,
     /// Accessibility not granted, or before/after recording). Otherwise
     /// mirrors `MicGate.detectionState` published from the gate.
     @Published private(set) var micGateState: MicGateDetectionState?
+    /// Short label of the meeting source the active gate is watching
+    /// ("Meet" or "Discord") — used by the menu bar tooltip so the user
+    /// can tell which integration is reading their mute state. `nil`
+    /// whenever `micGateState` is `nil`.
+    @Published private(set) var micGateSource: String?
 
     /// Live mic-level ring buffer — the popover and recording window read
     /// from this each frame to draw the user's waveform. Survives recorder
@@ -208,10 +213,12 @@ final class RecordingSession: ObservableObject {
             // an inner ObservableObject would not republish through a
             // parent's @Published of a class.
             self.micGateState = gate.detectionState
+            self.micGateSource = gate.sourceLabel
             self.micGateCancellable = gate.$detectionState.sink { [weak self] state in
                 self?.micGateState = state
             }
-            NSLog("[Meeting/Session] start: step 4 done — MicGate active for bundle=%@", bundleID)
+            NSLog("[Meeting/Session] start: step 4 done — MicGate active for bundle=%@ source=%@",
+                  bundleID, gate.sourceLabel)
         } else {
             NSLog("[Meeting/Session] start: step 4 skipped — no MicGate for bundle=%@ (or accessibility not granted)", bundleID)
         }
@@ -256,6 +263,7 @@ final class RecordingSession: ObservableObject {
         micGate = nil
         micGateCancellable = nil
         micGateState = nil
+        micGateSource = nil
         meetParticipants?.stop()
         meetParticipants = nil
         clipboardWatcher?.stop()
@@ -325,6 +333,7 @@ final class RecordingSession: ObservableObject {
         micGate = nil
         micGateCancellable = nil
         micGateState = nil
+        micGateSource = nil
 
         // Stop Meet participants collector and capture its accumulated set.
         // Final scrape happens below — by stopping the timer first we

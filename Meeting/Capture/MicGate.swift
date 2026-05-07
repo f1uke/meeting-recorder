@@ -86,6 +86,11 @@ final class MicGate: ObservableObject {
     /// re-render path is safe.
     @Published private(set) var detectionState: MicGateDetectionState = .awaitingDetection
 
+    /// Short label of the source the gate is watching ("Meet", "Discord")
+    /// — surfaced to the menu bar tooltip so the user can tell which
+    /// integration is live without opening the popover.
+    var sourceLabel: String { detector.sourceLabel }
+
     init(detector: any MicStateDetector) {
         self.detector = detector
     }
@@ -169,28 +174,41 @@ final class MicGate: ObservableObject {
 
 extension MicGate {
     /// Returns a gate appropriate for the recording target, or nil if no
-    /// detector is wired for this app. Currently supports Google Chrome
-    /// (with the assumption that the front tab is Google Meet — the
-    /// detector reads UI labels rather than network traffic, so any
-    /// non-Meet Chrome tab simply produces an empty interval set).
+    /// detector is wired for this app. Currently supports:
+    ///   - `com.google.Chrome` — assumes the front tab is Google Meet;
+    ///     the detector reads UI labels rather than network traffic, so a
+    ///     non-Meet tab simply produces an empty interval set.
+    ///   - `com.hnc.Discord` — Discord desktop voice panel (Mute/Unmute
+    ///     button in the bottom-left user pill).
     ///
     /// Returns nil (and logs) if Accessibility permission isn't granted —
     /// without it AX queries return nothing and the gate would silently
     /// produce no intervals.
     static func create(forBundleID bundleID: String?, pid: pid_t) -> MicGate? {
         guard let bundleID else { return nil }
-        guard isSupportedBundle(bundleID) else { return nil }
+        guard let detector = makeDetector(forBundleID: bundleID, pid: pid) else {
+            return nil
+        }
         guard AXIsProcessTrusted() else {
             NSLog("[Meeting/MicGate] skipping gate: Accessibility permission not granted to Meeting.app")
             return nil
         }
-        return MicGate(detector: GoogleMeetAXDetector(pid: pid))
+        return MicGate(detector: detector)
     }
 
-    private static func isSupportedBundle(_ bundleID: String) -> Bool {
+    private static func makeDetector(forBundleID bundleID: String, pid: pid_t) -> (any MicStateDetector)? {
+        switch bundleID {
         // Restricted to Chrome on purpose — Meet UI labels are the same in
         // Brave/Arc/Edge, but each needs its own verification round before
         // we promise it works. Add them after a probe run on the actual app.
-        bundleID == "com.google.Chrome"
+        case "com.google.Chrome":
+            return AXMicButtonDetector(pid: pid, sourceLabel: "Meet",
+                                       parser: GoogleMeetMicParser.parse)
+        case "com.hnc.Discord":
+            return AXMicButtonDetector(pid: pid, sourceLabel: "Discord",
+                                       parser: DiscordMicParser.parse)
+        default:
+            return nil
+        }
     }
 }

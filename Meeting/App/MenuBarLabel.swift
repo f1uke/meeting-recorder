@@ -25,7 +25,8 @@ struct MenuBarLabel: View {
                         .font(.system(size: 13, weight: .medium))
                 }
                 if let gateState = recording.micGateState {
-                    micGateIcon(for: gateState)
+                    micGateIcon(for: gateState,
+                                source: recording.micGateSource ?? "meeting app")
                 }
             }
             .font(.system(size: 13))
@@ -47,32 +48,33 @@ struct MenuBarLabel: View {
         }
     }
 
-    /// Tiny status badge that mirrors what the Meet mic-gate detector is
-    /// currently reading. Color/icon picked so the user can tell at a
-    /// glance from across the room which of the four states is live —
-    /// green = recording your voice, red = silenced, yellow = something
-    /// is wrong with detection.
+    /// Tiny status badge that mirrors what the active mic-gate detector
+    /// (Meet or Discord) is currently reading. Color/icon picked so the
+    /// user can tell at a glance from across the room which of the four
+    /// states is live — green = recording your voice, red = silenced,
+    /// yellow = something is wrong with detection.
     @ViewBuilder
-    private func micGateIcon(for state: MicGateDetectionState) -> some View {
+    private func micGateIcon(for state: MicGateDetectionState,
+                             source: String) -> some View {
         switch state {
         case .awaitingDetection:
             Image(systemName: "mic.fill")
                 .foregroundStyle(.gray)
-                .help("Looking for Meet mic button…")
+                .help("Looking for \(source) mic button…")
         case .detected(let isMicActive):
             if isMicActive {
                 Image(systemName: "mic.fill")
                     .foregroundStyle(.green)
-                    .help("Mic is on — voice will be transcribed")
+                    .help("Mic is on in \(source) — voice will be transcribed")
             } else {
                 Image(systemName: "mic.slash.fill")
                     .foregroundStyle(.red)
-                    .help("Mic is muted in Meet — this audio will be skipped from the transcript")
+                    .help("Mic is muted in \(source) — this audio will be skipped from the transcript")
             }
         case .lost:
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.yellow)
-                .help("Mic detection lost — open the Meet tab or PiP to resume tracking")
+                .help("\(source) mic detection lost — bring the meeting window or PiP back to resume tracking")
         }
     }
 }
