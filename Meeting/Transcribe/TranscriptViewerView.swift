@@ -1801,6 +1801,7 @@ final class SpeakerSamplePlayer: ObservableObject {
 
     private var player: AVPlayer?
     private var endObserver: Any?
+    private var endNotificationObserver: NSObjectProtocol?
 
     func play(speaker: SpeakerID, audioURL: URL, range: ClosedRange<TimeInterval>) {
         stop()
@@ -1823,6 +1824,21 @@ final class SpeakerSamplePlayer: ObservableObject {
             }
         }
         endObserver = token
+        // Belt-and-suspenders: when `end` lands past the audio file's real
+        // duration (e.g. last-segment timestamp drifts a bit past EOF, or
+        // the file got truncated), the boundary observer never fires and
+        // playback ends silently — leaving `playingSpeaker` stuck. The
+        // EOF notification covers that path so stop() always runs.
+        endNotificationObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.playingSpeaker == speaker else { return }
+                self.stop()
+            }
+        }
         // Zero-tolerance seek matters for sample playback because the
         // segment ranges come from word-level WhisperKit timestamps;
         // a quarter-second of slop would clip the sample's first word.
@@ -1837,6 +1853,10 @@ final class SpeakerSamplePlayer: ObservableObject {
             player.removeTimeObserver(endObserver)
         }
         endObserver = nil
+        if let endNotificationObserver {
+            NotificationCenter.default.removeObserver(endNotificationObserver)
+        }
+        endNotificationObserver = nil
         player?.pause()
         player = nil
         playingSpeaker = nil
