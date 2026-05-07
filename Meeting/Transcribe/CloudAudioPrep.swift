@@ -164,10 +164,14 @@ enum CloudAudioPrep {
                 // LLM-based transcription (Gemini, gpt-4o-*) has no
                 // internal VAD, so a fully-silent chunk gets
                 // "transcribed" as a hallucinated continuation of the
-                // system prompt. Speech RMS sits around −20 to −30 dBFS;
-                // quiet-room noise floor sits around −55 to −60. −50
-                // separates the two without dropping real-but-quiet speech.
-                if rmsDB < -50 {
+                // system prompt. Speech RMS sits around −20 to −30 dBFS.
+                // -50 was too loose for AAC-encoded output streams whose
+                // noise floor sits around -45 to -49 dBFS — silent chunks
+                // would slip through and Gemini hallucinated "สวัสดีครับ"
+                // on them. -40 catches those; trade-off is a chunk with
+                // only ≲1 s of real speech in 60 s of silence (RMS ~ -42)
+                // also gets skipped, losing brief greetings/acks.
+                if rmsDB < -40 {
                     skippedSilent += 1
                     subStart = subEnd
                     if totalDuration > 0 {
