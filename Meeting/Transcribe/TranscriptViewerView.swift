@@ -53,6 +53,12 @@ private struct TranscriptMainPane: View {
     @State private var search: String = ""
     @State private var isVideoFullScreen: Bool = false
     @StateObject private var playerModel = VideoPlayerModel()
+    /// Lives at the viewer root so segment-row clicks (in TranscriptScrollPane)
+    /// can synchronously stop a speaker sample before kicking the main
+    /// player back to playing — without waiting for the async KVO →
+    /// `isPlaying` → `onReceive` chain that the SpeakersPanel previously
+    /// relied on (which left both streams audible for ~16-50ms).
+    @StateObject private var samplePlayer = SpeakerSamplePlayer()
     @AppStorage("transcript.viewer.columnWidth") private var columnWidth: Double = 560
 
     var body: some View {
@@ -68,6 +74,7 @@ private struct TranscriptMainPane: View {
                         meeting: meeting,
                         transcript: transcript,
                         playerModel: playerModel,
+                        samplePlayer: samplePlayer,
                         columnWidth: $columnWidth,
                         onToggleFullScreen: { isVideoFullScreen.toggle() }
                     )
@@ -77,7 +84,8 @@ private struct TranscriptMainPane: View {
                         meeting: meeting,
                         transcript: bind(transcript),
                         search: search,
-                        playerModel: playerModel
+                        playerModel: playerModel,
+                        samplePlayer: samplePlayer
                     )
                     .frame(maxWidth: .infinity)
                 }
@@ -332,6 +340,7 @@ private struct TranscriptLeftColumn: View {
     let meeting: MeetingRecord
     let transcript: MergedTranscript
     @ObservedObject var playerModel: VideoPlayerModel
+    @ObservedObject var samplePlayer: SpeakerSamplePlayer
     @Binding var columnWidth: Double
     let onToggleFullScreen: () -> Void
 
@@ -353,7 +362,8 @@ private struct TranscriptLeftColumn: View {
                     SpeakersAttendeesRow(
                         meeting: meeting,
                         transcript: transcript,
-                        playerModel: playerModel
+                        playerModel: playerModel,
+                        samplePlayer: samplePlayer
                     )
                     if !meeting.contextItems.isEmpty {
                         ContextPanel(meeting: meeting)
@@ -380,6 +390,7 @@ private struct SpeakersAttendeesRow: View {
     let meeting: MeetingRecord
     let transcript: MergedTranscript
     @ObservedObject var playerModel: VideoPlayerModel
+    @ObservedObject var samplePlayer: SpeakerSamplePlayer
     @AppStorage("transcript.viewer.columnWidth") private var columnWidth: Double = 560
 
     /// Threshold below which the side-by-side layout becomes too cramped
@@ -395,7 +406,8 @@ private struct SpeakersAttendeesRow: View {
                 SpeakersPanel(
                     meeting: meeting,
                     transcript: transcript,
-                    playerModel: playerModel
+                    playerModel: playerModel,
+                    samplePlayer: samplePlayer
                 )
                 .frame(maxWidth: .infinity, alignment: .top)
                 AttendeesPanel(meeting: meeting)
@@ -406,7 +418,8 @@ private struct SpeakersAttendeesRow: View {
                 SpeakersPanel(
                     meeting: meeting,
                     transcript: transcript,
-                    playerModel: playerModel
+                    playerModel: playerModel,
+                    samplePlayer: samplePlayer
                 )
                 AttendeesPanel(meeting: meeting)
             }
@@ -639,11 +652,11 @@ private struct SpeakersPanel: View {
     let meeting: MeetingRecord
     let transcript: MergedTranscript
     @ObservedObject var playerModel: VideoPlayerModel
+    @ObservedObject var samplePlayer: SpeakerSamplePlayer
     @EnvironmentObject private var library: MeetingsLibrary
 
     @State private var editingID: SpeakerID?
     @State private var draftName: String = ""
-    @StateObject private var samplePlayer = SpeakerSamplePlayer()
     @AppStorage("transcript.viewer.expand.speakers") private var isExpanded: Bool = true
 
     var body: some View {
@@ -740,6 +753,11 @@ private struct SpeakersPanel: View {
         guard let first = candidates.first else { return }
         let now = playerModel.currentTime
         let next = candidates.first(where: { $0.start > now + 0.5 }) ?? first
+        // Cut the sample audio off in the same tick we resume the main
+        // player. Relying on the rate-KVO → @Published → onReceive chain
+        // alone leaves both streams audible for ~tens of ms — enough to
+        // hear as overlap when rapidly toggling between sample + timeline.
+        samplePlayer.stop()
         playerModel.seek(to: next.start)
     }
 
@@ -1191,6 +1209,7 @@ private struct TranscriptScrollPane: View {
     @Binding var transcript: MergedTranscript
     let search: String
     @ObservedObject var playerModel: VideoPlayerModel
+    @ObservedObject var samplePlayer: SpeakerSamplePlayer
 
     /// Cached active segment id. Updated only when playback crosses a
     /// segment boundary, so the SegmentRow `isActive` parameter is stable
@@ -1216,7 +1235,14 @@ private struct TranscriptScrollPane: View {
                             searchQuery: search,
                             actionItem: actionItemMap[segment.id],
                             isActive: activeID == segment.id,
-                            onSeek: { playerModel.seek(to: segment.start) },
+                            onSeek: {
+                                // Synchronous stop kills any in-flight
+                                // speaker sample before the main player
+                                // ramps back to rate=1 — see SpeakersPanel
+                                // jump(to:) for the rationale.
+                                samplePlayer.stop()
+                                playerModel.seek(to: segment.start)
+                            },
                             onCommitEdit: { newText in
                                 transcript = transcript.updatingSegment(id: segment.id, text: newText)
                             },
