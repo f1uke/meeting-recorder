@@ -28,6 +28,14 @@ struct Summary: Codable, Equatable, Hashable, Sendable {
     /// 3-6 topical sections grouping related discussion across the
     /// meeting (NOT a chronological replay).
     var discussionTopics: [DiscussionTopic]?
+    /// Enriched references the LLM resolved from URLs the user captured
+    /// during the meeting — currently Jira cards fetched via the
+    /// Atlassian MCP server. Keyed back to the original URL so the
+    /// note renderer can swap the bare URL label for the issue title +
+    /// status. nil for legacy summaries written before this field
+    /// existed; default lets pre-existing call sites keep working
+    /// without naming the new parameter.
+    var references: [Reference]? = nil
 
     /// Whether this Summary has the rich fields needed to render a
     /// complete Markdown note. False for legacy summaries (pre-renderer)
@@ -35,6 +43,21 @@ struct Summary: Codable, Equatable, Hashable, Sendable {
     var hasRichFields: Bool {
         tldr != nil || keyDecisions != nil || discussionTopics != nil
     }
+}
+
+/// Enriched metadata for a URL the user captured during the meeting —
+/// e.g. a Jira card the LLM fetched so the meeting note's References
+/// section can show "MOBILE-123 — Reword onboarding text · In Progress"
+/// instead of a bare atlassian.net URL.
+struct Reference: Codable, Equatable, Hashable, Sendable {
+    /// The original URL exactly as it appeared in the clipboard capture.
+    /// Used as the join key against `MeetingRecord.contextItems` so the
+    /// renderer can match enriched info back to the original item.
+    var url: String
+    /// Human-readable label, e.g. "MOBILE-123 — Reword onboarding text".
+    var label: String
+    /// Optional one-line status / metadata, e.g. "In Progress · Pim · DDL Mar 15".
+    var note: String?
 }
 
 struct DiscussionTopic: Codable, Equatable, Hashable, Sendable, Identifiable {

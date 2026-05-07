@@ -42,6 +42,7 @@ actor ClaudeCLIProvider: LLMProvider {
             let keyDecisions: [String]?
             let actionItems: [WireItem]
             let discussionTopics: [WireTopic]?
+            let references: [WireRef]?
         }
         struct WireItem: Codable {
             let speaker: String
@@ -51,6 +52,11 @@ actor ClaudeCLIProvider: LLMProvider {
         struct WireTopic: Codable {
             let heading: String
             let bullets: [String]
+        }
+        struct WireRef: Codable {
+            let url: String
+            let label: String
+            let note: String?
         }
 
         guard let data = llmJSON.data(using: .utf8) else {
@@ -76,6 +82,16 @@ actor ClaudeCLIProvider: LLMProvider {
             keyDecisions: wire.keyDecisions?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
             discussionTopics: wire.discussionTopics?.map {
                 DiscussionTopic(heading: $0.heading, bullets: $0.bullets)
+            },
+            references: wire.references?.compactMap { ref in
+                let label = ref.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                let url = ref.url.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !label.isEmpty, !url.isEmpty else { return nil }
+                return Reference(
+                    url: url,
+                    label: label,
+                    note: ref.note?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                )
             }
         )
     }
@@ -185,6 +201,13 @@ actor ClaudeCLIProvider: LLMProvider {
                 "Engineering capacity tight after Tar's leave"
               ]
             }
+          ],
+          "references": [
+            {
+              "url": "https://example.atlassian.net/browse/MOBILE-123",
+              "label": "MOBILE-123 — Reword onboarding text",
+              "note": "In Progress · assignee: Pim · due Mar 15"
+            }
           ]
         }
 
@@ -195,6 +218,7 @@ actor ClaudeCLIProvider: LLMProvider {
         - "keyDecisions" is concrete decisions reached, NOT proposals or open questions. Empty array if none.
         - "actionItems" is concrete commitments / TODOs assigned to a person. Empty array if none. "speaker" matches a display name from the Speakers roster above; use "You" for the user (the one labeled "Me"). "timestamp" is mm:ss or h:mm:ss matching where the commitment was made.
         - "discussionTopics" is 3-6 topical sections grouping related points across the meeting, NOT a chronological replay. Each topic has a short heading and 2-5 bullets. Bullets are plain text (Markdown bold/italic OK), no nested lists. Empty array only if the meeting was too short to warrant topical grouping.
+        - "references" is the resolved metadata for any [JIRA card] URLs in the captured context (see the rule under that section for fetch + shape). Empty array if none were tagged or all fetches failed. Do NOT include non-Jira URLs here.
         - Output ONLY the JSON object. No fences, no preamble.
 
         Transcript:
@@ -233,10 +257,17 @@ actor ClaudeCLIProvider: LLMProvider {
     /// (`clipboard/<filename>.png`) and the working directory of the
     /// `claude` subprocess is set to the meeting folder, so Claude's
     /// Read tool can fetch the image bytes if visual context helps.
+    ///
+    /// URLs that look like Jira cards are tagged `[JIRA card]` so the
+    /// prompt rules can target them — the model is instructed to fetch
+    /// each one (Atlassian MCP > WebFetch) and emit an entry in the
+    /// `references` JSON field. The renderer uses that to upgrade the
+    /// References section's bare URL into "KEY-123 — Title · Status".
     private static func buildContextSection(context: MeetingLLMContext) -> String {
         guard !context.contextItems.isEmpty else { return "" }
         var lines: [String] = ["Captured during the meeting (clipboard + visited links):"]
         var hasImages = false
+        var hasJira = false
         for item in context.contextItems {
             let stamp = formatTimestamp(item.offset)
             switch item.kind {
@@ -248,7 +279,11 @@ actor ClaudeCLIProvider: LLMProvider {
                     : snippet
                 lines.append("- [\(stamp)] copied text: \"\(trimmed)\"")
             case .url:
+                let urlString = item.text ?? ""
+                let isJira = isJiraURL(urlString)
+                if isJira { hasJira = true }
                 let label: String = {
+                    if isJira { return "[JIRA card]" }
                     if item.source == .browser {
                         if let title = item.pageTitle, !title.isEmpty {
                             return "visited \"\(title)\""
@@ -257,7 +292,7 @@ actor ClaudeCLIProvider: LLMProvider {
                     }
                     return "copied link"
                 }()
-                lines.append("- [\(stamp)] \(label): \(item.text ?? "")")
+                lines.append("- [\(stamp)] \(label): \(urlString)")
             case .image:
                 hasImages = true
                 if let filename = item.imageFilename {
@@ -271,7 +306,26 @@ actor ClaudeCLIProvider: LLMProvider {
             lines.append("")
             lines.append("Image files are at the listed relative paths from your working directory; you may Read them if visual context would meaningfully change the summary.")
         }
+        if hasJira {
+            lines.append("")
+            lines.append("For each item tagged [JIRA card], fetch the issue using your Atlassian MCP tool (preferred) or WebFetch as a fallback, then emit one object in `references` with `url` (the original URL verbatim), `label` (e.g. \"MOBILE-123 — Reword onboarding text\"), and `note` (one short line, e.g. \"In Progress · assignee: Pim · due Mar 15\"). If a fetch fails, skip that entry rather than guessing.")
+        }
         return "\n\n" + lines.joined(separator: "\n")
+    }
+
+    /// Match Atlassian-Cloud Jira card URLs: `https://<tenant>.atlassian.net/browse/PROJ-123`
+    /// (with optional query string / fragment). Tight on purpose — we
+    /// don't want to mis-flag random `/browse/` paths from non-Jira
+    /// sites and waste a tool call.
+    private static func isJiraURL(_ s: String) -> Bool {
+        guard let url = URL(string: s),
+              let host = url.host?.lowercased(),
+              host.hasSuffix(".atlassian.net") else { return false }
+        let path = url.path
+        guard path.hasPrefix("/browse/") else { return false }
+        let key = path.dropFirst("/browse/".count)
+        let pattern = #"^[A-Z][A-Z0-9_]+-\d+$"#
+        return key.range(of: pattern, options: .regularExpression) != nil
     }
 
     /// Speakers section — pairs each transcript label with the
