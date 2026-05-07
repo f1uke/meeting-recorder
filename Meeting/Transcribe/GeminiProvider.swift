@@ -775,45 +775,76 @@ actor GeminiProvider: TranscriptionProvider {
         }
 
         // Progress bands (within transcribeBatch's 0...1):
-        //   0 .. 0.08   chunk uploads (parallel, fast)
-        //   0.08..0.10  JSONL upload + waitActive
-        //   0.10..0.12  batch submit
-        //   0.12..0.88  poll  (longest by far)
+        //   0 .. 0.04   chunk prep (parallel per stream — decode + AEC +
+        //               chunking + WAV write; non-trivial on long meetings)
+        //   0.04..0.10  chunk uploads (parallel, fast)
+        //   0.10..0.12  JSONL upload + waitActive
+        //   0.12..0.14  batch submit
+        //   0.14..0.88  poll  (longest by far)
         //   0.88..0.92  responses download
         //   0.92..0.95  parse
         //   0.95..1.00  per-stream diarization (output stream only)
-        let uploadEnd = 0.08
-        let jsonlUploadEnd = 0.10
-        let submitEnd = 0.12
+        let prepEnd = 0.04
+        let uploadEnd = 0.10
+        let jsonlUploadEnd = 0.12
+        let submitEnd = 0.14
         let pollEnd = 0.88
         let downloadEnd = 0.92
         let parseEnd = 0.95
 
         onProgress?(0)
 
-        // (1) Prepare chunks per stream. Capture mapping so we can route
-        // segments back after parsing.
-        var perStreamChunks: [Int: [CloudAudioPrep.Chunk]] = [:]
+        // (1) Prepare chunks for every stream in parallel. Each stream's
+        // prep is CPU+IO bound (decode → AEC → chunking → WAV write) and
+        // pre-fa2cf57 the per-stream sync path overlapped this with
+        // upload, so the batch path's serial prep felt like a regression
+        // (bar pinned at 2% for 30-60 s on long meetings). Running the
+        // streams concurrently halves wall time, and emitting a per-stream
+        // fraction into a band-allocated aggregator keeps the bar moving
+        // throughout instead of going dark until the first upload lands.
+        let providerName = name
+        let prepAggregator = ChunkProgressAggregator(count: streams.count) { fraction in
+            onProgress?(fraction * prepEnd)
+        }
+        let perStreamChunks = try await withThrowingTaskGroup(
+            of: (Int, [CloudAudioPrep.Chunk]).self
+        ) { group in
+            for (sIdx, stream) in streams.enumerated() {
+                let streamIdx = sIdx
+                let streamRef = stream
+                group.addTask {
+                    let chunks = try CloudAudioPrep.prepareChunks(
+                        audioURL: streamRef.audioURL,
+                        options: streamRef.options,
+                        tempPrefix: "gemini-batch-s\(streamIdx)",
+                        chunkDuration: 60,
+                        providerName: providerName,
+                        logTag: "Gemini",
+                        onProgress: { f in
+                            prepAggregator.update(index: streamIdx, fraction: f)
+                        }
+                    )
+                    return (streamIdx, chunks)
+                }
+            }
+            var collected: [Int: [CloudAudioPrep.Chunk]] = [:]
+            while let (idx, chunks) = try await group.next() {
+                collected[idx] = chunks
+            }
+            return collected
+        }
         var allTempURLs: [URL] = []
-        for (sIdx, stream) in streams.enumerated() {
-            let chunks = try CloudAudioPrep.prepareChunks(
-                audioURL: stream.audioURL,
-                options: stream.options,
-                tempPrefix: "gemini-batch-s\(sIdx)",
-                chunkDuration: 60,
-                providerName: name,
-                logTag: "Gemini"
-            )
+        for chunks in perStreamChunks.values {
             for chunk in chunks where chunk.isTemp {
                 allTempURLs.append(chunk.url)
             }
-            perStreamChunks[sIdx] = chunks
         }
         defer {
             for url in allTempURLs {
                 try? FileManager.default.removeItem(at: url)
             }
         }
+        onProgress?(prepEnd)
 
         // (2) Upload every chunk from every stream in parallel. No cap —
         // URLSession's per-host connection pool absorbs the burst, and
@@ -821,7 +852,7 @@ actor GeminiProvider: TranscriptionProvider {
         // quota that drove the 8-cap on the sync path.
         let totalChunks = perStreamChunks.values.reduce(0) { $0 + $1.count }
         let aggregator = ChunkProgressAggregator(count: totalChunks) { fraction in
-            onProgress?(fraction * uploadEnd)
+            onProgress?(prepEnd + fraction * (uploadEnd - prepEnd))
         }
         struct UploadedTagged: Sendable {
             let streamIndex: Int

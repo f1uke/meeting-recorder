@@ -109,7 +109,8 @@ enum CloudAudioPrep {
         tempPrefix: String,
         chunkDuration: TimeInterval = defaultChunkDuration,
         providerName: String,
-        logTag: String
+        logTag: String,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [Chunk] {
         let sampleRate = 16000
         let path = audioURL.path(percentEncoded: false)
@@ -134,50 +135,27 @@ enum CloudAudioPrep {
         let totalDuration = Double(audio.count) / Double(sampleRate)
         var chunks: [Chunk] = []
         var skippedSilent = 0
-        var interiorBoundaries = 0   // cuts that happen inside a voiced range
-        var alignedBoundaries = 0    // subset that landed on a silence run
-        let backwardSamples = Int(cutSearchBackward * Double(sampleRate))
-        // Slice each voiced range into <= chunkDuration sub-chunks so
-        // every uploaded chunk maps back to the source via a single
-        // `offset`. Interior cuts get nudged onto the nearest sentence
-        // pause via findSilenceCutPoint so we don't slice a phrase mid-
-        // word at a fixed 60 s tick (model loses context on the next
-        // chunk's first segment when that happens). RMS check still runs
-        // as a backstop — if the user hadn't muted but a long silent
-        // stretch is in the audio (e.g. output stream during a break),
-        // we still want to skip it.
+        // Fixed-tick chunking: cut at every `chunkDuration` boundary
+        // inside each voiced range. We tried silence-aligned cuts in
+        // fd9264d (now reverted) — empirically that path made prep run
+        // ~4× slower on long meetings under Debug builds, even though
+        // CPU profiling pointed at the writeWAV `open(2)` syscall
+        // rather than findSilenceCutPoint itself. `findSilenceCutPoint`
+        // is kept for future reintroduction once we have a path that
+        // doesn't regress prep time (e.g. running it after upload).
         for range in voiced {
             var subStart = range.start
             while subStart < range.end {
-                let targetEnd = min(subStart + chunkDuration, range.end)
+                // prepareChunks is sync (no await points), so a parent
+                // Task.cancel() — e.g. user hitting Cancel mid-run — would
+                // otherwise be ignored until we returned to the enclosing
+                // withThrowingTaskGroup. Checking each iteration lets the
+                // user abandon a long-running prep within ~1 chunk.
+                try Task.checkCancellation()
+                let subEnd = min(subStart + chunkDuration, range.end)
                 let startSample = Int(subStart * Double(sampleRate))
-                let targetSample = min(audio.count, Int(targetEnd * Double(sampleRate)))
-                guard startSample < targetSample else { break }
-
-                let endSample: Int
-                if targetEnd >= range.end - 0.001 {
-                    // Hitting the natural end of a voiced range — the
-                    // mute gate already gives us a clean boundary here,
-                    // no point searching for a smaller pause inside it.
-                    endSample = targetSample
-                } else {
-                    interiorBoundaries += 1
-                    // searchEnd = targetSample (never past it): going
-                    // beyond targetEnd would push the chunk over the
-                    // provider's per-chunk token budget. searchStart =
-                    // targetSample - backwardSamples, clamped above
-                    // startSample so the chunk always has at least 1
-                    // sample of audio.
-                    let cut = findSilenceCutPoint(
-                        audio: audio,
-                        searchStart: max(targetSample - backwardSamples, startSample + 1),
-                        searchEnd: targetSample,
-                        fallback: targetSample,
-                        sampleRate: sampleRate
-                    )
-                    endSample = cut.sampleIndex
-                    if cut.alignedToSilence { alignedBoundaries += 1 }
-                }
+                let endSample = min(audio.count, Int(subEnd * Double(sampleRate)))
+                guard startSample < endSample else { break }
 
                 let chunkSamples = Array(audio[startSample..<endSample])
                 var rms: Float = 0
@@ -191,20 +169,26 @@ enum CloudAudioPrep {
                 // separates the two without dropping real-but-quiet speech.
                 if rmsDB < -50 {
                     skippedSilent += 1
-                    subStart = Double(endSample) / Double(sampleRate)
+                    subStart = subEnd
+                    if totalDuration > 0 {
+                        onProgress?(min(1, subStart / totalDuration))
+                    }
                     continue
                 }
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("\(tempPrefix)-c\(chunks.count)-\(UUID().uuidString).wav")
                 try writeWAV(chunkSamples, sampleRate: sampleRate, to: url)
                 chunks.append(Chunk(url: url, offset: subStart, isTemp: true))
-                subStart = Double(endSample) / Double(sampleRate)
+                subStart = subEnd
+                if totalDuration > 0 {
+                    onProgress?(min(1, subStart / totalDuration))
+                }
             }
         }
+        onProgress?(1)
         if chunks.count > 1 || skippedSilent > 0 {
-            NSLog("[Meeting/Transcribe] %@ %.1fs audio → %d chunks of <=%.0fs (skipped %d silent, %d/%d cuts aligned to silence)",
-                  logTag, totalDuration, chunks.count, chunkDuration,
-                  skippedSilent, alignedBoundaries, interiorBoundaries)
+            NSLog("[Meeting/Transcribe] %@ %.1fs audio → %d chunks of <=%.0fs (skipped %d silent)",
+                  logTag, totalDuration, chunks.count, chunkDuration, skippedSilent)
         }
         return chunks
     }
@@ -459,41 +443,88 @@ enum CloudAudioPrep {
     /// accepts.
     static func writeWAV(_ samples: [Float], sampleRate: Int, to url: URL) throws {
         let count = samples.count
+        let dataBytes = count * 2
+
+        // Float → Int16 PCM. Single contiguous buffer; the per-sample
+        // clamp+scale is the unavoidable hot loop.
         var pcm = [Int16](repeating: 0, count: count)
         for i in 0..<count {
             let clamped = max(-1.0, min(1.0, samples[i]))
             pcm[i] = Int16(clamped * 32767)
         }
-        let dataBytes = count * 2
-        var data = Data(capacity: 44 + dataBytes)
 
-        func appendLE32(_ v: UInt32) {
-            withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) }
+        // Build the 44-byte WAV header into a pre-reserved [UInt8]. The
+        // previous version used Data + closure-based appendLE16/32 helpers
+        // (each wrapping withUnsafeBytes + Data.append per field) which
+        // showed up as a hot frame; plain UInt8 appends into a
+        // reserveCapacity'd array compile to direct byte writes with no
+        // closure dispatch.
+        var header = [UInt8]()
+        header.reserveCapacity(44)
+        func u32(_ v: UInt32) {
+            let le = v.littleEndian
+            header.append(UInt8(truncatingIfNeeded: le))
+            header.append(UInt8(truncatingIfNeeded: le >> 8))
+            header.append(UInt8(truncatingIfNeeded: le >> 16))
+            header.append(UInt8(truncatingIfNeeded: le >> 24))
         }
-        func appendLE16(_ v: UInt16) {
-            withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) }
+        func u16(_ v: UInt16) {
+            let le = v.littleEndian
+            header.append(UInt8(truncatingIfNeeded: le))
+            header.append(UInt8(truncatingIfNeeded: le >> 8))
         }
+        header.append(contentsOf: "RIFF".utf8)
+        u32(UInt32(36 + dataBytes))
+        header.append(contentsOf: "WAVE".utf8)
+        header.append(contentsOf: "fmt ".utf8)
+        u32(16)              // PCM chunk size
+        u16(1)               // PCM format
+        u16(1)               // mono
+        u32(UInt32(sampleRate))
+        u32(UInt32(sampleRate * 2))   // byte rate
+        u16(2)               // block align
+        u16(16)              // bits per sample
+        header.append(contentsOf: "data".utf8)
+        u32(UInt32(dataBytes))
 
-        // RIFF header
-        data.append(contentsOf: Array("RIFF".utf8))
-        appendLE32(UInt32(36 + dataBytes))
-        data.append(contentsOf: Array("WAVE".utf8))
-        // fmt chunk
-        data.append(contentsOf: Array("fmt ".utf8))
-        appendLE32(16)              // PCM chunk size
-        appendLE16(1)               // PCM format
-        appendLE16(1)               // mono
-        appendLE32(UInt32(sampleRate))
-        appendLE32(UInt32(sampleRate * 2)) // byte rate
-        appendLE16(2)               // block align
-        appendLE16(16)              // bits per sample
-        // data chunk
-        data.append(contentsOf: Array("data".utf8))
-        appendLE32(UInt32(dataBytes))
-        pcm.withUnsafeBytes { raw in
-            data.append(contentsOf: raw)
+        // POSIX open + 2 writes + close. The previous Data.write path —
+        // even non-atomic — showed up as ~48% of prep CPU in `sample`,
+        // because Foundation builds a unified buffer then dispatches
+        // through NSData internals for every write. This direct path
+        // skips the Foundation buffer concat (no header+PCM merge) and
+        // the redundant memory copy (PCM bytes go straight from the
+        // [Int16] backing storage into write(2)). For a 60 s × 16 kHz
+        // chunk = 1.92 MB body, that's ~2 MB of avoided memcpy per
+        // chunk × N chunks across two streams.
+        let path = url.path(percentEncoded: false)
+        let fd = path.withCString { Darwin.open($0, O_WRONLY | O_CREAT | O_TRUNC, 0o644) }
+        guard fd >= 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain, code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "open(\(path)) failed: \(String(cString: strerror(errno)))"]
+            )
         }
+        defer { Darwin.close(fd) }
 
-        try data.write(to: url, options: [.atomic])
+        func writeAll(_ ptr: UnsafeRawPointer, _ length: Int) throws {
+            var written = 0
+            while written < length {
+                let n = Darwin.write(fd, ptr.advanced(by: written), length - written)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(errno),
+                        userInfo: [NSLocalizedDescriptionKey: "write failed: \(String(cString: strerror(errno)))"]
+                    )
+                }
+                written += n
+            }
+        }
+        try header.withUnsafeBufferPointer { hp in
+            try writeAll(UnsafeRawPointer(hp.baseAddress!), hp.count)
+        }
+        try pcm.withUnsafeBytes { raw in
+            try writeAll(raw.baseAddress!, raw.count)
+        }
     }
 }
