@@ -136,6 +136,20 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(meetingsFolder, forKey: Keys.meetingsFolder) }
     }
 
+    /// Whether the cross-meeting speaker identity matcher runs at all. When
+    /// off, MeetingsLibrary is constructed without an IdentityStore reference
+    /// so no suggestions surface and no new identities accumulate.
+    @Published var identitySuggestionsEnabled: Bool {
+        didSet { UserDefaults.standard.set(identitySuggestionsEnabled, forKey: Keys.identitySuggestionsEnabled) }
+    }
+
+    /// Matcher threshold — scores below this are dropped before the UI sees
+    /// them. Settings exposes 0.45 (aggressive) … 0.70 (conservative) in
+    /// 0.05 steps.
+    @Published var identityMinSuggestScore: Double {
+        didSet { UserDefaults.standard.set(identityMinSuggestScore, forKey: Keys.identityMinSuggestScore) }
+    }
+
     private init() {
         let raw = UserDefaults.standard.object(forKey: Keys.expectedSpeakers) as? Int
         self.expectedSpeakerCount = ExpectedSpeakers(storageValue: raw)
@@ -185,6 +199,11 @@ final class AppPreferences: ObservableObject {
         self.meetingsFolder = storedMeetingsFolder.isEmpty
             ? Self.defaultMeetingsFolder
             : storedMeetingsFolder
+        // Identity matching defaults to ON so new installs get suggestions
+        // without first visiting Settings.
+        self.identitySuggestionsEnabled = (UserDefaults.standard.object(forKey: Keys.identitySuggestionsEnabled) as? Bool) ?? true
+        let storedMin = UserDefaults.standard.object(forKey: Keys.identityMinSuggestScore) as? Double
+        self.identityMinSuggestScore = storedMin ?? 0.55
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -238,6 +257,8 @@ final class AppPreferences: ObservableObject {
         static let groupExpansions = "dev.fluke.meeting.groupExpansions"
         static let meetingNotesFolder = "dev.fluke.meeting.meetingNotesFolder"
         static let meetingsFolder = "dev.fluke.meeting.meetingsFolder"
+        static let identitySuggestionsEnabled = "dev.fluke.meeting.identitySuggestionsEnabled"
+        static let identityMinSuggestScore = "dev.fluke.meeting.identityMinSuggestScore"
     }
 }
 

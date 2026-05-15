@@ -12,6 +12,12 @@ final class AppState: ObservableObject {
     let library: MeetingsLibrary
     let toast: ToastPresenter
     let llm: LLMProvider
+    /// Cross-meeting speaker identity store + extraction queue. The store is
+    /// always created so Settings can show "Stored identities: 0" + Reset
+    /// even when the suggestions feature is turned off. The library only
+    /// receives them when the user has the toggle on.
+    let identityStore: IdentityStore
+    let embeddingQueue: EmbeddingExtractionQueue
     /// Window picker model lives at app scope so the menu-bar popover and
     /// the standalone picker window share the same selection state.
     let picker: WindowPickerModel
@@ -49,14 +55,38 @@ final class AppState: ObservableObject {
 
     init() {
         self.recording = RecordingSession()
-        let library = MeetingsLibrary()
+
+        // Identity store — lives in the same Application Support directory
+        // as library.json so a `tccutil reset` / app reinstall wipes both
+        // together cleanly.
+        let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("dev.fluke.meeting", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        let identityStore = IdentityStore(
+            fileURL: appSupport.appendingPathComponent("identities.json")
+        )
+        let embeddingQueue = EmbeddingExtractionQueue()
+        self.identityStore = identityStore
+        self.embeddingQueue = embeddingQueue
+
+        let prefs = AppPreferences.shared
+        let matchingConfig = MatchingConfig(
+            minSuggestScore: prefs.identityMinSuggestScore
+        )
+        let library = MeetingsLibrary(
+            identityStore: prefs.identitySuggestionsEnabled ? identityStore : nil,
+            embeddingQueue: embeddingQueue,
+            matchingConfig: matchingConfig
+        )
         self.library = library
         let toast = ToastPresenter()
         self.toast = toast
         self.queue = TranscriptionQueue(
             providerFactory: { Self.makeProviderSnapshot() },
             library: library,
-            toast: toast
+            toast: toast,
+            embeddingQueue: embeddingQueue
         )
         self.llm = ClaudeCLIProvider()
         self.picker = WindowPickerModel()

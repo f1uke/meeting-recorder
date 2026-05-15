@@ -122,6 +122,11 @@ final class TranscriptionQueue: ObservableObject {
 
     private let library: MeetingsLibrary
     private let toast: ToastPresenter
+    /// Optional — when set, finished transcripts get queued for cross-meeting
+    /// identity embedding extraction. Wired up by AppState at app launch;
+    /// existing tests that construct TranscriptionQueue directly leave it nil
+    /// and skip the embedding step.
+    private let embeddingQueue: EmbeddingExtractionQueue?
 
     private var workerTask: Task<Void, Never>?
     /// Cancel handle for the currently-executing job's provider call.
@@ -138,11 +143,13 @@ final class TranscriptionQueue: ObservableObject {
     init(
         providerFactory: @escaping @MainActor () -> ProviderSnapshot,
         library: MeetingsLibrary,
-        toast: ToastPresenter
+        toast: ToastPresenter,
+        embeddingQueue: EmbeddingExtractionQueue? = nil
     ) {
         self.providerFactory = providerFactory
         self.library = library
         self.toast = toast
+        self.embeddingQueue = embeddingQueue
     }
 
     // MARK: - Public API
@@ -491,6 +498,13 @@ final class TranscriptionQueue: ObservableObject {
 
         // Refresh the library so duration / speakers fill in for this row.
         library.rescan()
+
+        // Kick off acoustic embedding extraction in the background. Idempotent —
+        // if the meeting already has embeddings.json (re-transcribe case) the
+        // queue's process() skips it.
+        if let embeddingQueue {
+            Task { await embeddingQueue.enqueue(meetingFolder: folder) }
+        }
 
         // Toast — pick up the freshly-rescanned record so we have the
         // accurate title / duration / speaker count. (If the scan hasn't

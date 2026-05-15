@@ -15,6 +15,7 @@ struct AppEnvironment: ViewModifier {
             .environmentObject(state.library)
             .environmentObject(state.picker)
             .environmentObject(state.calendar)
+            .environmentObject(state.identityStore)
     }
 }
 
