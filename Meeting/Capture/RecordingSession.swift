@@ -112,7 +112,7 @@ final class RecordingSession: ObservableObject {
         NSLog("[Meeting/Session] start: step 1 — SCStream.startCapture …")
         let coord = ScreenCaptureCoordinator()
         do {
-            try await coord.start(window: window, videoURL: videoURL)
+            try await coord.start(source: .window(window), videoURL: videoURL)
             guard state == .starting else {
                 try? await coord.stop()
                 NSLog("[Meeting/Session] start: cancelled during step 1 — rolled back")

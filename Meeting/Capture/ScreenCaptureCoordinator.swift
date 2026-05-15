@@ -12,15 +12,39 @@ final class ScreenCaptureCoordinator: NSObject {
     private let frameSink = FrameSink()
     private let frameQueue = DispatchQueue(label: "dev.fluke.meeting.frame-sink")
 
-    func start(window: SCWindow, videoURL: URL) async throws {
-        let filter = SCContentFilter(desktopIndependentWindow: window)
+    func start(source: CaptureSource, videoURL: URL) async throws {
+        let filter: SCContentFilter
+        let captureSize: CGSize
+
+        switch source {
+        case .window(let window):
+            filter = SCContentFilter(desktopIndependentWindow: window)
+            captureSize = window.frame.size
+
+        case .display(let display):
+            // Exclude our own app from the captured surface so the
+            // popover / future recording window does not appear in the
+            // video. exceptingWindows:[] keeps every non-self window
+            // visible on the display.
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true
+            )
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            let selfApps = content.applications.filter { $0.processID == ownPID }
+            filter = SCContentFilter(
+                display: display,
+                excludingApplications: selfApps,
+                exceptingWindows: []
+            )
+            captureSize = display.frame.size
+        }
 
         let config = SCStreamConfiguration()
         // Capture at logical pixel size (not retina × scale). For meeting
         // playback the user reads transcripts, glances at the video for
         // context — sub-retina is fine and it cuts encoded bytes by ~4×.
-        config.width = max(2, Int(window.frame.width))
-        config.height = max(2, Int(window.frame.height))
+        config.width = max(2, Int(captureSize.width))
+        config.height = max(2, Int(captureSize.height))
         // 10 fps is enough for talking heads + slide changes; cuts another 3×.
         config.minimumFrameInterval = CMTime(value: 1, timescale: 10)
         config.queueDepth = 8
