@@ -171,8 +171,7 @@ final class RecordingSession: ObservableObject {
             let pidLocal = targetPID
             try await Task.detached(priority: .userInitiated) {
                 try tap.start(
-                    targetPID: pidLocal,
-                    targetBundleID: bundleIDLocal,
+                    target: .process(pid: pidLocal, bundleID: bundleIDLocal),
                     url: outputURLLocal,
                     rmsBuffer: outputRMSLocal
                 )

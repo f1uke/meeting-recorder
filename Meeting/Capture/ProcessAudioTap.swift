@@ -15,37 +15,64 @@ import CoreAudio
 // isolation it would trip the same _dispatch_assert_queue_fail trap as
 // MicRecorder.installTap.
 final class ProcessAudioTap: @unchecked Sendable {
+    enum TapTarget {
+        /// Per-process tap. Includes Electron multi-helper discovery via
+        /// bundle-ID prefix scan.
+        case process(pid: pid_t, bundleID: String)
+        /// Whole-system tap. Excludes our own audio process to prevent
+        /// feedback with Meeting's UI sounds.
+        case system
+    }
+
     private var processTapID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var deviceProcID: AudioDeviceIOProcID?
     private var fileBox: AudioFileBox?
     private let queue = DispatchQueue(label: "dev.fluke.meeting.process-tap", qos: .userInitiated)
-    /// Number of audio process objects this tap is bridging — typically 1
-    /// for native apps and 2-4+ for Electron/Chromium apps with helpers.
-    /// Surfaced in the recording window's source sublabel so the user can
-    /// verify the multi-process tap is wired up correctly.
+    /// Number of audio process objects this tap is bridging. For `.process`
+    /// targets, typically 1 for native apps and 2-4+ for Electron/Chromium.
+    /// For `.system`, reports 0 (count is not meaningful — every process
+    /// is tapped).
     private(set) var processCount: Int = 0
 
-    func start(targetPID: pid_t, targetBundleID: String?, url: URL, rmsBuffer: RMSRingBuffer? = nil) throws {
-        // Electron / Chromium apps (Discord, Slack, VSCode...) produce audio
-        // in helper processes whose PID differs from the main window's PID.
-        // We tap every audio process whose bundleID shares a prefix with the
-        // main app, so the helper's audio is captured as well.
-        let processObjectIDs = Self.collectAudioObjectIDs(
-            mainPID: targetPID,
-            bundleIDPrefix: targetBundleID
-        )
-        guard !processObjectIDs.isEmpty else {
-            throw TapError.translatePID(targetPID, OSStatus(kAudioHardwareBadObjectError))
-        }
-        self.processCount = processObjectIDs.count
-        NSLog("[Meeting/Tap] start pid=%d bundle=%@ → tapping %d audio object(s): %@",
-              targetPID,
-              targetBundleID ?? "(none)",
-              processObjectIDs.count,
-              processObjectIDs.map { String($0) }.joined(separator: ","))
+    func start(target: TapTarget, url: URL, rmsBuffer: RMSRingBuffer? = nil) throws {
+        let tapDescription: CATapDescription
+        let aggregateName: String
 
-        let tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+        switch target {
+        case .process(let pid, let bundleID):
+            // Electron / Chromium apps (Discord, Slack, VSCode...) produce
+            // audio in helper processes whose PID differs from the main
+            // window's PID. We tap every audio process whose bundleID
+            // shares a prefix with the main app, so the helper's audio is
+            // captured as well.
+            let processObjectIDs = Self.collectAudioObjectIDs(
+                mainPID: pid,
+                bundleIDPrefix: bundleID
+            )
+            guard !processObjectIDs.isEmpty else {
+                throw TapError.translatePID(pid, OSStatus(kAudioHardwareBadObjectError))
+            }
+            self.processCount = processObjectIDs.count
+            NSLog("[Meeting/Tap] start .process pid=%d bundle=%@ → tapping %d audio object(s): %@",
+                  pid, bundleID, processObjectIDs.count,
+                  processObjectIDs.map { String($0) }.joined(separator: ","))
+            tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+            aggregateName = "MeetingTap-\(pid)"
+
+        case .system:
+            // Whole-system tap. Best-effort exclude our own audio process
+            // so the tap does not pick up Meeting's UI sounds; if AppKit
+            // hasn't surfaced our process to the HAL yet (no audio played),
+            // we pass [] which is fine — fully global.
+            let selfExclude = Self.selfProcessAudioObjectIDs()
+            self.processCount = 0
+            NSLog("[Meeting/Tap] start .system → excluding self audio objects: %@",
+                  selfExclude.map { String($0) }.joined(separator: ","))
+            tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: selfExclude)
+            aggregateName = "MeetingTap-system"
+        }
+
         tapDescription.uuid = UUID()
         tapDescription.muteBehavior = .unmuted
 
@@ -68,7 +95,7 @@ final class ProcessAudioTap: @unchecked Sendable {
 
         let aggregateUID = UUID().uuidString
         let description: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "MeetingTap-\(targetPID)",
+            kAudioAggregateDeviceNameKey: aggregateName,
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
@@ -169,6 +196,18 @@ final class ProcessAudioTap: @unchecked Sendable {
     deinit { stop() }
 
     // MARK: - Helpers
+
+    /// Returns the audio process object IDs that belong to *this* app —
+    /// every helper / main-PID combination where the bundleID matches our
+    /// own. Used by `.system` tap mode to exclude self from the mixdown.
+    /// Returns [] when our app has not played any audio yet (HAL has no
+    /// process object for us). Empty exclusion → fully global tap, which
+    /// is acceptable.
+    private static func selfProcessAudioObjectIDs() -> [AudioObjectID] {
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        let ourBundleID = Bundle.main.bundleIdentifier ?? ""
+        return collectAudioObjectIDs(mainPID: ourPID, bundleIDPrefix: ourBundleID)
+    }
 
     private static func collectAudioObjectIDs(mainPID: pid_t, bundleIDPrefix: String?) -> [AudioObjectID] {
         var collected: Set<AudioObjectID> = []
