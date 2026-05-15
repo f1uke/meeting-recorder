@@ -2,18 +2,43 @@ import SwiftUI
 import ScreenCaptureKit
 import AppKit
 
+/// What the user selected in the source picker — either a specific
+/// window or an entire display. Hashable so it can drive selection
+/// state without holding references to SCWindow / SCDisplay (which
+/// turn over each refresh).
+enum PickerSource: Hashable {
+    case window(CGWindowID)
+    case display(CGDirectDisplayID)
+}
+
 @MainActor
 final class WindowPickerModel: ObservableObject {
     @Published private(set) var windows: [SCWindow] = []
-    @Published var selectedWindowID: CGWindowID?
+    @Published private(set) var displays: [SCDisplay] = []
+    @Published var selectedSource: PickerSource?
     @Published private(set) var isLoading = false
     @Published private(set) var loadError: String?
 
     private var iconCache: [pid_t: NSImage] = [:]
 
+    /// Resolves the selection to a concrete `CaptureSource` if the
+    /// picked window / display is still present in the latest scan.
+    var selectedCaptureSource: CaptureSource? {
+        switch selectedSource {
+        case .window(let id):
+            return windows.first { $0.windowID == id }.map { .window($0) }
+        case .display(let id):
+            return displays.first { $0.displayID == id }.map { .display($0) }
+        case .none:
+            return nil
+        }
+    }
+
+    /// Compat shim for callers that haven't migrated to
+    /// `selectedCaptureSource` yet (PopoverIdleView). Removed in Task 7.
     var selectedWindow: SCWindow? {
-        guard let id = selectedWindowID else { return nil }
-        return windows.first { $0.windowID == id }
+        if case .window(let win) = selectedCaptureSource { return win }
+        return nil
     }
 
     func icon(for window: SCWindow) -> NSImage? {
@@ -45,11 +70,53 @@ final class WindowPickerModel: ObservableObject {
                 return a.localizedCaseInsensitiveCompare(b) == .orderedAscending
             }
 
-            if let id = selectedWindowID, !windows.contains(where: { $0.windowID == id }) {
-                selectedWindowID = nil
+            // Displays are unfiltered — every available display is a valid
+            // source. Sort with primary first, then by displayID for stable
+            // ordering across refreshes.
+            self.displays = content.displays.sorted { lhs, rhs in
+                let lp = lhs.displayID == CGMainDisplayID()
+                let rp = rhs.displayID == CGMainDisplayID()
+                if lp != rp { return lp }
+                return lhs.displayID < rhs.displayID
             }
+
+            clearStaleSelection()
         } catch {
             self.loadError = error.localizedDescription
+        }
+    }
+
+    /// Test-only seam. Production code goes through `refresh()`, which
+    /// can't run in unit tests because SCShareableContent requires the
+    /// running app + Screen Recording TCC. Tests pass `displayIDs` to
+    /// exercise the bookkeeping logic without needing real SCDisplay
+    /// instances (which have no public init).
+    func _seedForTests(windowIDs: [CGWindowID] = [], displayIDs: [CGDirectDisplayID] = []) {
+        self.windows = []
+        self.displays = []
+        self._seededWindowIDs = windowIDs
+        self._seededDisplayIDs = displayIDs
+        clearStaleSelection()
+    }
+    private var _seededWindowIDs: [CGWindowID] = []
+    private var _seededDisplayIDs: [CGDirectDisplayID] = []
+
+    private func clearStaleSelection() {
+        switch selectedSource {
+        case .window(let id):
+            let liveIDs: Set<CGWindowID> =
+                Set(windows.map { $0.windowID }).union(_seededWindowIDs)
+            if !liveIDs.contains(id) {
+                selectedSource = nil
+            }
+        case .display(let id):
+            let liveIDs: Set<CGDirectDisplayID> =
+                Set(displays.map { $0.displayID }).union(_seededDisplayIDs)
+            if !liveIDs.contains(id) {
+                selectedSource = nil
+            }
+        case .none:
+            break
         }
     }
 
@@ -148,8 +215,8 @@ struct WindowPicker: View {
                         ForEach(group.windows, id: \.windowID) { window in
                             WindowRow(
                                 window: window,
-                                isSelected: model.selectedWindowID == window.windowID,
-                                onSelect: { model.selectedWindowID = window.windowID }
+                                isSelected: model.selectedSource == .window(window.windowID),
+                                onSelect: { model.selectedSource = .window(window.windowID) }
                             )
                         }
                     }
