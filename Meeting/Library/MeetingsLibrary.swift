@@ -23,8 +23,22 @@ final class MeetingsLibrary: ObservableObject {
     private var overrides: LibraryOverrides
     private var fileSource: DispatchSourceFileSystemObject?
 
-    init(meetingsRoot: URL = AppPreferences.shared.meetingsFolderURL) {
+    // Cross-meeting speaker identity — optional so existing tests don't need
+    // to pass a store. When nil, `loadRecord` skips suggestion computation.
+    private let identityStore: IdentityStore?
+    private let embeddingQueue: EmbeddingExtractionQueue?
+    private let matchingConfig: MatchingConfig
+
+    init(
+        meetingsRoot: URL = AppPreferences.shared.meetingsFolderURL,
+        identityStore: IdentityStore? = nil,
+        embeddingQueue: EmbeddingExtractionQueue? = nil,
+        matchingConfig: MatchingConfig = MatchingConfig()
+    ) {
         self.meetingsRoot = meetingsRoot
+        self.identityStore = identityStore
+        self.embeddingQueue = embeddingQueue
+        self.matchingConfig = matchingConfig
 
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -74,12 +88,21 @@ final class MeetingsLibrary: ObservableObject {
             options: [.skipsHiddenFiles]
         )) ?? []
 
+        let identitiesSnapshot = identityStore?.identities ?? []
+        let queue = embeddingQueue
+        let config = matchingConfig
         let records = folders.compactMap { folder -> MeetingRecord? in
             var isDir: ObjCBool = false
             let path = folder.path(percentEncoded: false)
             FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
             guard isDir.boolValue else { return nil }
-            return Self.loadRecord(folder: folder, override: overrides.meetings[folder.lastPathComponent])
+            return Self.loadRecord(
+                folder: folder,
+                override: overrides.meetings[folder.lastPathComponent],
+                identities: identitiesSnapshot,
+                embeddingQueue: queue,
+                matchingConfig: config
+            )
         }
 
         meetings = records.sorted { $0.recordedAt > $1.recordedAt }
@@ -193,6 +216,107 @@ final class MeetingsLibrary: ObservableObject {
         rescan()
     }
 
+    // MARK: - Identity matching
+
+    /// User confirmed `speaker_N == identity X`. Updates speakers.json
+    /// (displayName + identityID) and folds the speaker's embedding into the
+    /// global identity centroid via running-mean weighted by sampleSeconds.
+    func applyIdentitySuggestion(_ suggestion: IdentitySuggestion, meeting: MeetingRecord.ID) {
+        guard let store = identityStore else { return }
+        guard let m = meetings.first(where: { $0.id == meeting }) else { return }
+        guard let embFile = try? MeetingEmbeddingsFile.read(from: m.folder),
+              let emb = embFile.embeddings.first(where: { $0.speakerID == suggestion.speakerID })
+        else { return }
+        guard let identity = store.identities.first(where: { $0.id == suggestion.identityID })
+        else { return }
+
+        store.updateCentroid(
+            id: identity.id,
+            newCentroid: emb.centroid,
+            newSampleSeconds: emb.sampleSeconds,
+            meetingFolder: m.folder.lastPathComponent
+        )
+        updateSpeaker(meeting: meeting, speakerID: suggestion.speakerID) { profile in
+            profile.displayName = identity.displayName
+            profile.identityID = identity.id
+            if profile.email == nil, let email = identity.emails.first {
+                profile.email = email
+            }
+        }
+    }
+
+    /// User dismissed a suggestion. Appended to per-meeting rejection log
+    /// so we won't suggest the same pairing again for this meeting.
+    func rejectIdentitySuggestion(_ suggestion: IdentitySuggestion, meeting: MeetingRecord.ID) {
+        guard let m = meetings.first(where: { $0.id == meeting }) else { return }
+        var embFile = (try? MeetingEmbeddingsFile.read(from: m.folder)) ?? MeetingEmbeddingsFile(
+            schemaVersion: 1,
+            embedderModel: SpeakerEmbedder.modelTag,
+            embeddings: [],
+            rejectedIdentities: [],
+            embeddingFailed: false
+        )
+        embFile.appendRejection(Rejection(
+            speakerID: suggestion.speakerID,
+            identityID: suggestion.identityID
+        ))
+        try? embFile.write(to: m.folder)
+        rescan()
+    }
+
+    /// After the caller writes a speaker's displayName/email via `updateSpeaker`,
+    /// fold the speaker's embedding into a global identity. Either reuses an
+    /// existing identity (matched by email or by case-insensitive displayName)
+    /// or mints a new one. Idempotent: if no embedding is cached yet or no
+    /// identity store is wired up, this is a no-op. Doesn't overwrite the
+    /// speaker's attendeeId/email/role — those were already set by the caller.
+    func linkOrCreateIdentity(speakerID: SpeakerID, meeting: MeetingRecord.ID) {
+        guard let store = identityStore else { return }
+        guard let m = meetings.first(where: { $0.id == meeting }) else { return }
+        // Pull the just-written profile from disk so we see the caller's edit.
+        guard let profile = (try? SpeakerMapFile.read(from: m.folder))?
+                .speakers.first(where: { $0.id == speakerID })
+        else { return }
+        // Skip if already linked.
+        if profile.identityID != nil { return }
+        // Skip if displayName is still a raw "speaker_N" — nothing to link to.
+        if profile.displayName.hasPrefix("speaker_") { return }
+        guard let embFile = try? MeetingEmbeddingsFile.read(from: m.folder),
+              let emb = embFile.embeddings.first(where: { $0.speakerID == speakerID })
+        else { return }
+
+        let lowerName = profile.displayName.lowercased()
+        let lowerEmail = profile.email?.lowercased()
+        let existing = store.identities.first { ident in
+            if let lowerEmail, ident.emails.contains(lowerEmail) { return true }
+            return ident.displayName.lowercased() == lowerName
+        }
+        let identityID: String
+        if let existing {
+            store.updateCentroid(
+                id: existing.id,
+                newCentroid: emb.centroid,
+                newSampleSeconds: emb.sampleSeconds,
+                meetingFolder: m.folder.lastPathComponent
+            )
+            if let lowerEmail, !existing.emails.contains(lowerEmail) {
+                store.addEmail(id: existing.id, email: lowerEmail)
+            }
+            identityID = existing.id
+        } else {
+            identityID = store.create(
+                displayName: profile.displayName,
+                email: profile.email,
+                centroid: emb.centroid,
+                sampleSeconds: emb.sampleSeconds,
+                meetingFolder: m.folder.lastPathComponent
+            )
+        }
+        updateSpeaker(meeting: meeting, speakerID: speakerID) { p in
+            p.identityID = identityID
+        }
+    }
+
     /// Searched meetings used by the list column.
     var visibleMeetings: [MeetingRecord] {
         let trimmed = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -238,7 +362,13 @@ final class MeetingsLibrary: ObservableObject {
 
     // MARK: - Loaders
 
-    private static func loadRecord(folder: URL, override: MeetingOverride?) -> MeetingRecord? {
+    private static func loadRecord(
+        folder: URL,
+        override: MeetingOverride?,
+        identities: [Identity] = [],
+        embeddingQueue: EmbeddingExtractionQueue? = nil,
+        matchingConfig: MatchingConfig = MatchingConfig()
+    ) -> MeetingRecord? {
         let folderName = folder.lastPathComponent
         let date = MeetingFolderName.date(from: folderName)
 
@@ -296,6 +426,52 @@ final class MeetingsLibrary: ObservableObject {
         let derivedTitle = calendarEvent?.title ?? folderTitle(folderName: folderName, date: date)
         let title = override?.title ?? derivedTitle
 
+        // Cross-meeting identity suggestions — only computed when the caller
+        // passed an `identities` snapshot. Embeddings file is loaded lazily:
+        // present → match against identities; missing + has transcript →
+        // enqueue extraction in the background (suggestions will appear on
+        // the next rescan after the queue writes embeddings.json).
+        var identitySuggestions: [IdentitySuggestion] = []
+        if let embFile = try? MeetingEmbeddingsFile.read(from: folder),
+           !embFile.embeddings.isEmpty,
+           !identities.isEmpty,
+           embFile.embedderModel == SpeakerEmbedder.modelTag {
+            let attendeeEmails = (calendarEvent?.attendees ?? []).compactMap { $0.email }
+            let ctx = MatchContext(
+                attendeeEmails: attendeeEmails,
+                meetParticipantNames: meetParticipants,
+                meetingFolder: folder.lastPathComponent
+            )
+            // Filter to speakers that haven't been user-named yet — leave
+            // ones already labelled (or with identityID set) alone.
+            // Default labels come in two shapes:
+            //   - "speaker_N" (raw SpeakerID rawValue)
+            //   - "Speaker N" (formatted by the transcription pipeline)
+            // Treat both as "unmapped" so the matcher can suggest a real name.
+            let unmappedSpeakerIDs = Set(speakerProfiles.compactMap { profile -> SpeakerID? in
+                if profile.identityID != nil { return nil }
+                let lower = profile.displayName.lowercased()
+                let normalized = lower.replacingOccurrences(of: " ", with: "_")
+                if normalized.hasPrefix("speaker_") { return profile.id }
+                if lower == "unknown" { return profile.id }
+                return nil
+            })
+            let activeEmbeddings = embFile.embeddings.filter { unmappedSpeakerIDs.contains($0.speakerID) }
+            identitySuggestions = IdentityMatcher.match(
+                embeddings: activeEmbeddings,
+                identities: identities,
+                context: ctx,
+                rejected: embFile.rejectedIdentities,
+                config: matchingConfig,
+                now: Date()
+            )
+        } else if hasTranscript,
+                  (try? MeetingEmbeddingsFile.read(from: folder)) == nil,
+                  let queue = embeddingQueue {
+            // Lazy backfill — fire-and-forget; next rescan picks up suggestions.
+            Task { await queue.enqueue(meetingFolder: folder) }
+        }
+
         return MeetingRecord(
             folder: folder,
             recordedAt: date,
@@ -312,7 +488,8 @@ final class MeetingsLibrary: ObservableObject {
             summary: summary,
             calendarEvent: calendarEvent,
             meetParticipants: meetParticipants,
-            contextItems: contextItems
+            contextItems: contextItems,
+            identitySuggestions: identitySuggestions
         )
     }
 

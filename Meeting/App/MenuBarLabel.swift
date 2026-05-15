@@ -10,11 +10,12 @@ import SwiftUI
 struct MenuBarLabel: View {
     @ObservedObject var recording: RecordingSession
     @ObservedObject var queue: TranscriptionQueue
+    @ObservedObject var appState: AppState
     @ObservedObject private var prefs = AppPreferences.shared
 
     var body: some View {
-        switch (recording.state, queue.activeCount) {
-        case let (.recording(_, started), _):
+        switch (recording.state, queue.activeCount, appState.isExtractingEmbeddings) {
+        case let (.recording(_, started), _, _):
             HStack(spacing: 4) {
                 Image(systemName: "circle.fill")
                     .foregroundStyle(.red)
@@ -31,7 +32,7 @@ struct MenuBarLabel: View {
             }
             .font(.system(size: 13))
 
-        case (_, let active) where active > 0:
+        case (_, let active, _) where active > 0:
             HStack(spacing: 3) {
                 Image(systemName: "waveform")
                 if active > 1 {
@@ -41,6 +42,14 @@ struct MenuBarLabel: View {
                 }
             }
             .font(.system(size: 13))
+
+        case (_, _, true):
+            HStack(spacing: 3) {
+                Image(systemName: "person.wave.2")
+                Text("…").font(.system(size: 13, weight: .medium))
+            }
+            .font(.system(size: 13))
+            .help("Extracting voice fingerprints from finished meetings")
 
         default:
             Image(systemName: "captions.bubble.fill")

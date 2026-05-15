@@ -3,6 +3,8 @@
 **Status:** Approved 2026-05-15
 **Scope:** Auto-suggest mapping ของ `speaker_N` ใน Transcript Viewer โดยใช้ acoustic embedding + calendar / Meet name priors
 
+**Revision (impl 2026-05-15):** เช็ค Core ML metadata จริง — argmax pyannote-v3-w8a16: output `[1, 64, 256]` (**256-dim**, ไม่ใช่ 192), input waveform `[1, 480000]` (**30s window** ไม่ใช่ 5s), speaker_masks `[1, 64, 1767]`. Pipeline ปรับตามนี้ทั้งหมด
+
 ## Goal
 
 ลด manual rename ของ `speaker_N` ในทุก meeting โดย:

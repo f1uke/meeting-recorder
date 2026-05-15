@@ -145,7 +145,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if let button = statusItem.button {
             let label = MenuBarLabel(
                 recording: state.recording,
-                queue: state.queue
+                queue: state.queue,
+                appState: state
             )
             let host = NSHostingView(rootView: label)
             host.translatesAutoresizingMaskIntoConstraints = false
