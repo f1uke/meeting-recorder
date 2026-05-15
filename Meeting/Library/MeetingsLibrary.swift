@@ -320,21 +320,33 @@ final class MeetingsLibrary: ObservableObject {
     /// identity store is wired up, this is a no-op. Doesn't overwrite the
     /// speaker's attendeeId/email/role — those were already set by the caller.
     func linkOrCreateIdentity(speakerID: SpeakerID, meeting: MeetingRecord.ID) {
-        guard let store = identityStore else { return }
         guard let m = meetings.first(where: { $0.id == meeting }) else { return }
+        // Every early-return path must refresh so the caller's prior
+        // updateSpeaker(refresh: false) edit propagates to the UI.
+        guard let store = identityStore else {
+            refreshMeeting(folder: m.folder)
+            return
+        }
         // Pull the just-written profile from disk so we see the caller's edit.
         guard let profile = (try? SpeakerMapFile.read(from: m.folder))?
                 .speakers.first(where: { $0.id == speakerID })
-        else { return }
-        // Skip if already linked.
-        if profile.identityID != nil { return }
+        else {
+            refreshMeeting(folder: m.folder)
+            return
+        }
+        // Skip if already linked — but still refresh so UI catches up.
+        if profile.identityID != nil {
+            refreshMeeting(folder: m.folder)
+            return
+        }
         // Skip if displayName is still a raw "speaker_N" — nothing to link to.
-        if profile.displayName.hasPrefix("speaker_") { return }
+        if profile.displayName.hasPrefix("speaker_") {
+            refreshMeeting(folder: m.folder)
+            return
+        }
         guard let embFile = try? MeetingEmbeddingsFile.read(from: m.folder),
               let emb = embFile.embeddings.first(where: { $0.speakerID == speakerID })
         else {
-            // No embedding cached yet — still call refresh so any prior
-            // updateSpeaker(refresh: false) edit shows up.
             refreshMeeting(folder: m.folder)
             return
         }
