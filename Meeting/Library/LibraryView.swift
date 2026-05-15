@@ -3,9 +3,6 @@ import SwiftUI
 /// Two-pane Library window. List (meetings) · Detail (metadata + speakers
 /// strip + AI summary + action items).
 struct LibraryView: View {
-    @EnvironmentObject private var library: MeetingsLibrary
-    @Environment(\.openWindow) private var openWindow
-
     var body: some View {
         HStack(spacing: 0) {
             LibraryList()
@@ -33,7 +30,6 @@ struct LibraryView: View {
             )
             .ignoresSafeArea()
         }
-        .onAppear { library.rescan() }
     }
 }
 
