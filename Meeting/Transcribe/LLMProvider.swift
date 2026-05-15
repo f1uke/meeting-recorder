@@ -22,6 +22,15 @@ struct Summary: Codable, Equatable, Hashable, Sendable {
     /// One-line tldr in the transcript's primary language. Used as the
     /// `> blockquote` directly under the Markdown note's title.
     var tldr: String?
+    /// The meeting's intent — 1-3 short bullets answering "what was this
+    /// meeting trying to achieve" derived from the opening of the
+    /// transcript, calendar title, and captured context. Renders as the
+    /// 🎯 Goals section right after Overview so the reader sees *why*
+    /// the meeting happened before scanning decisions. Optional so
+    /// legacy summary.json files still decode; default lets existing
+    /// Summary() call sites (tests, fixtures) keep working without
+    /// naming the new parameter.
+    var goals: [String]? = nil
     /// Concrete decisions reached in the meeting — separate from action
     /// items (which are commitments/TODOs assigned to a person).
     var keyDecisions: [String]?
@@ -41,7 +50,7 @@ struct Summary: Codable, Equatable, Hashable, Sendable {
     /// complete Markdown note. False for legacy summaries (pre-renderer)
     /// — callers re-run generation to upgrade.
     var hasRichFields: Bool {
-        tldr != nil || keyDecisions != nil || discussionTopics != nil
+        tldr != nil || keyDecisions != nil || discussionTopics != nil || goals != nil
     }
 }
 

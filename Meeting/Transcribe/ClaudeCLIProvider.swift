@@ -45,6 +45,7 @@ actor ClaudeCLIProvider: LLMProvider {
         struct Wire: Codable {
             let tldr: String?
             let summary: String
+            let goals: [String]?
             let keyDecisions: [String]?
             let actionItems: [WireItem]
             let discussionTopics: [WireTopic]?
@@ -73,7 +74,7 @@ actor ClaudeCLIProvider: LLMProvider {
             wire = try JSONDecoder().decode(Wire.self, from: data)
         } catch {
             throw LLMError.decodeFailed(
-                "Expected JSON {tldr, summary, keyDecisions[], actionItems[], discussionTopics[]}: \(error.localizedDescription)\n\nRaw:\n\(llmJSON.prefix(800))"
+                "Expected JSON {tldr, summary, goals[], keyDecisions[], actionItems[], discussionTopics[]}: \(error.localizedDescription)\n\nRaw:\n\(llmJSON.prefix(800))"
             )
         }
 
@@ -85,6 +86,7 @@ actor ClaudeCLIProvider: LLMProvider {
             generatedAt: Date(),
             providerName: name,
             tldr: wire.tldr?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            goals: wire.goals?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
             keyDecisions: wire.keyDecisions?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
             discussionTopics: wire.discussionTopics?.map {
                 DiscussionTopic(heading: $0.heading, bullets: $0.bullets)
@@ -189,6 +191,10 @@ actor ClaudeCLIProvider: LLMProvider {
         {
           "tldr": "One-line summary in the transcript's primary language. ~12-20 words.",
           "summary": "1-2 paragraph plain text summary in the transcript's primary language. Use **bold** to mark 2-4 key phrases.",
+          "goals": [
+            "Align on the API shape between web and mobile",
+            "Decide whether to ship the badge in sprint 11 or push to 12"
+          ],
           "keyDecisions": [
             "Move Q1 release to Mar 15 to give QA an extra week"
           ],
@@ -221,10 +227,11 @@ actor ClaudeCLIProvider: LLMProvider {
         - Match the transcript's primary language for ALL prose (tldr, summary, decisions, action item text, topic headings, bullets).
         - "tldr" is one short sentence — what the meeting was about + the most important outcome.
         - "summary" is 1-2 paragraphs. Use **bold** for 2-4 key phrases. Plain Markdown allowed (bold, italic, inline code) — no headings, no lists.
+        - "goals" is 1-3 short bullets answering "what was this meeting trying to achieve". Derive from the opening minutes of the transcript, the calendar title, and the captured context. Focus on INTENT (e.g. "Align on API shape between web and app", "Decide ship date for badge feature") — NOT outcomes (those go in keyDecisions). Use the transcript's primary language. Empty array only if the meeting had no clear stated objective.
         - "keyDecisions" is concrete decisions reached, NOT proposals or open questions. Empty array if none.
         - "actionItems" is concrete commitments / TODOs assigned to a person. Empty array if none. "speaker" matches a display name from the Speakers roster above; use "You" for the user (the one labeled "Me"). "timestamp" is mm:ss or h:mm:ss matching where the commitment was made.
         - "discussionTopics" is 3-6 topical sections grouping related points across the meeting, NOT a chronological replay. Each topic has a short heading and 2-5 bullets. Bullets are plain text (Markdown bold/italic OK), no nested lists. Empty array only if the meeting was too short to warrant topical grouping.
-        - "references" is the resolved metadata for any [JIRA card] URLs in the captured context (see the rule under that section for fetch + shape). Empty array if none were tagged or all fetches failed. Do NOT include non-Jira URLs here.
+        - "references" is the resolved metadata for every URL the captured-context section flagged with [JIRA card], [Confluence page], or [embedded link]. Follow the per-tag rules in that section for what to fetch and what shape `label` / `note` should take. Empty array only if no such URLs were captured or every fetch failed.
         - Output ONLY the JSON object. No fences, no preamble.
 
         Transcript:

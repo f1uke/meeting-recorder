@@ -28,6 +28,7 @@ enum MeetingNoteRenderer {
             out += "> \(tldr)\n\n"
         }
         out += renderOverview(meeting: meeting)
+        out += renderGoals(summary)
         out += renderSummary(summary)
         out += renderDecisions(summary)
         out += renderActionItems(summary)
@@ -77,7 +78,7 @@ enum MeetingNoteRenderer {
     }
 
     private static func renderOverview(meeting: MeetingRecord) -> String {
-        var lines: [String] = ["## Overview"]
+        var lines: [String] = ["## 📋 Overview"]
         lines.append("**When:** \(formatWhen(meeting: meeting))")
         let locationText = meeting.calendarEvent?.location?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -90,14 +91,32 @@ enum MeetingNoteRenderer {
         return lines.joined(separator: "\n") + "\n\n"
     }
 
+    /// Goals section — what the meeting was trying to achieve. Sits
+    /// between Overview and Summary so the reader sees the *intent*
+    /// before scanning conclusions. Skipped entirely when the LLM
+    /// returned no goals (legacy summary.json, or a meeting too
+    /// freeform to have a stated objective) — empty Goals header would
+    /// add noise without information.
+    private static func renderGoals(_ summary: Summary) -> String {
+        let goals = (summary.goals ?? []).filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !goals.isEmpty else { return "" }
+        var lines: [String] = ["## 🎯 Goals"]
+        for g in goals {
+            lines.append("- \(g)")
+        }
+        return lines.joined(separator: "\n") + "\n\n"
+    }
+
     private static func renderSummary(_ summary: Summary) -> String {
         let body = summary.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let content = body.isEmpty ? "_None recorded_" : body
-        return "## Summary\n\(content)\n\n"
+        return "## 📝 Summary\n\(content)\n\n"
     }
 
     private static func renderDecisions(_ summary: Summary) -> String {
-        var lines: [String] = ["## Key Decisions"]
+        var lines: [String] = ["## ⬆️ Decisions"]
         let decisions = (summary.keyDecisions ?? []).filter {
             !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -112,7 +131,7 @@ enum MeetingNoteRenderer {
     }
 
     private static func renderActionItems(_ summary: Summary) -> String {
-        var lines: [String] = ["## Action Items"]
+        var lines: [String] = ["## ✅ Action Items"]
         if summary.actionItems.isEmpty {
             lines.append("_None_")
         } else {
@@ -131,7 +150,7 @@ enum MeetingNoteRenderer {
     }
 
     private static func renderDiscussion(_ summary: Summary) -> String {
-        var out = "## Discussion Notes\n"
+        var out = "## 🗣️ Discussion Notes\n"
         let topics = (summary.discussionTopics ?? []).filter { !$0.bullets.isEmpty }
         if topics.isEmpty {
             out += "_None recorded_\n"
@@ -153,7 +172,7 @@ enum MeetingNoteRenderer {
     private static func renderReferences(meeting: MeetingRecord, summary: Summary) -> String {
         let refs = summary.references ?? []
         let urlItems = meeting.contextItems.filter { $0.kind == .url }
-        var lines: [String] = ["## References"]
+        var lines: [String] = ["## 🔗 References"]
 
         if !refs.isEmpty {
             // LLM-curated references are the source of truth — they
@@ -234,7 +253,7 @@ enum MeetingNoteRenderer {
             let trimmed = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return !Self.isStandaloneURL(trimmed)
         }
-        var lines: [String] = ["## Captured Materials"]
+        var lines: [String] = ["## 📎 Captured Materials"]
         if imageItems.isEmpty && textItems.isEmpty {
             lines.append("_None_")
         } else {
