@@ -31,6 +31,10 @@ final class AppState: ObservableObject {
     let notifier: CalendarNotifier
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
+    /// True while `EmbeddingExtractionQueue` has at least one job pending or
+    /// running. Drives the MenuBarLabel "Embedding" indicator so the user knows
+    /// when post-transcript voice fingerprint extraction is still going on.
+    @Published private(set) var isExtractingEmbeddings: Bool = false
 
     private var cancellables: Set<AnyCancellable> = []
 
@@ -92,6 +96,18 @@ final class AppState: ObservableObject {
         self.picker = WindowPickerModel()
         self.calendar = CalendarStore()
         self.notifier = CalendarNotifier(calendar: calendar)
+
+        // Bridge the embedding queue's actor-isolated activity flag to the
+        // MainActor @Published one so MenuBarLabel can observe it directly.
+        // AppState lives for the lifetime of the app, so an unowned ref is
+        // safe and side-steps Swift 6's nested-weak-capture diagnostic.
+        Task { [unowned self] in
+            await embeddingQueue.setOnActiveChanged { active in
+                Task { @MainActor [unowned self] in
+                    self.isExtractingEmbeddings = active
+                }
+            }
+        }
 
         Task { @MainActor [weak self] in
             guard let self else { return }
