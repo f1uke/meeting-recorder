@@ -26,8 +26,8 @@ struct MatchContext: Sendable {
 /// Weights + threshold for the matcher. Exposed so AppPreferences can override
 /// `minSuggestScore` from the Settings slider.
 struct MatchingConfig: Sendable {
-    var minSuggestScore: Double = 0.55
-    var highConfidenceScore: Double = 0.75
+    var minSuggestScore: Double = 0.45
+    var highConfidenceScore: Double = 0.65
     var maxSuggestionsPerSpeaker: Int = 3
     var embeddingWeight: Double = 0.65
     var calendarWeight: Double = 0.20

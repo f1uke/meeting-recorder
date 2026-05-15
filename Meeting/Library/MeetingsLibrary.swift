@@ -444,9 +444,16 @@ final class MeetingsLibrary: ObservableObject {
             )
             // Filter to speakers that haven't been user-named yet — leave
             // ones already labelled (or with identityID set) alone.
+            // Default labels come in two shapes:
+            //   - "speaker_N" (raw SpeakerID rawValue)
+            //   - "Speaker N" (formatted by the transcription pipeline)
+            // Treat both as "unmapped" so the matcher can suggest a real name.
             let unmappedSpeakerIDs = Set(speakerProfiles.compactMap { profile -> SpeakerID? in
                 if profile.identityID != nil { return nil }
-                if profile.displayName.hasPrefix("speaker_") { return profile.id }
+                let lower = profile.displayName.lowercased()
+                let normalized = lower.replacingOccurrences(of: " ", with: "_")
+                if normalized.hasPrefix("speaker_") { return profile.id }
+                if lower == "unknown" { return profile.id }
                 return nil
             })
             let activeEmbeddings = embFile.embeddings.filter { unmappedSpeakerIDs.contains($0.speakerID) }

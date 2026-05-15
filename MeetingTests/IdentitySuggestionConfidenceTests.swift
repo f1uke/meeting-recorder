@@ -3,7 +3,7 @@ import XCTest
 
 final class IdentitySuggestionConfidenceTests: XCTestCase {
     func test_threshold_maps_to50pct() {
-        XCTAssertEqual(IdentityMatcher.confidencePercent(0.55), 50)
+        XCTAssertEqual(IdentityMatcher.confidencePercent(0.45), 50)
     }
     func test_perfect_maps_to99pct() {
         XCTAssertEqual(IdentityMatcher.confidencePercent(1.0), 99)
@@ -15,7 +15,7 @@ final class IdentitySuggestionConfidenceTests: XCTestCase {
         XCTAssertEqual(IdentityMatcher.confidencePercent(1.5), 99)
     }
     func test_midpoint_isAbout75pct() {
-        // (0.775 - 0.55) / 0.45 = 0.5 → 50 + 0.5*49 = 74
-        XCTAssertEqual(IdentityMatcher.confidencePercent(0.775), 74)
+        // (0.725 - 0.45) / 0.55 = 0.5 → 50 + 0.5*49 = 74
+        XCTAssertEqual(IdentityMatcher.confidencePercent(0.725), 74)
     }
 }

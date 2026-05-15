@@ -203,7 +203,7 @@ final class AppPreferences: ObservableObject {
         // without first visiting Settings.
         self.identitySuggestionsEnabled = (UserDefaults.standard.object(forKey: Keys.identitySuggestionsEnabled) as? Bool) ?? true
         let storedMin = UserDefaults.standard.object(forKey: Keys.identityMinSuggestScore) as? Double
-        self.identityMinSuggestScore = storedMin ?? 0.55
+        self.identityMinSuggestScore = storedMin ?? 0.45
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still

@@ -64,11 +64,11 @@ enum IdentityMatcher {
     }
 
     /// Map a raw score (already filtered ≥ minSuggestScore) to a 50–99 integer
-    /// percent for the UI. Linear over [0.55, 1.0]; values outside that range
+    /// percent for the UI. Linear over [0.45, 1.0]; values outside that range
     /// clamp. Deliberately NOT a probability — the cosine doesn't translate.
     static func confidencePercent(_ score: Double) -> Int {
-        let s = max(0.55, min(1.0, score))
-        let normalized = (s - 0.55) / (1.0 - 0.55)
+        let s = max(0.45, min(1.0, score))
+        let normalized = (s - 0.45) / (1.0 - 0.45)
         return Int(50 + normalized * 49)
     }
 
