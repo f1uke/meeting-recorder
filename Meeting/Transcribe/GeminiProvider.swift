@@ -355,6 +355,27 @@ actor GeminiProvider: TranscriptionProvider {
         (500...599).contains(code)
     }
 
+    /// Candidate `finishReason` values that mean "Gemini's safety/policy
+    /// layer suppressed the output." We treat these as a soft failure of
+    /// a single chunk and substitute a placeholder segment, rather than
+    /// failing the entire batch — a Pro recitation false-positive on a
+    /// single chunk should not throw away every other chunk's transcript.
+    private static let blockedFinishReasons: Set<String> = [
+        "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "LANGUAGE"
+    ]
+
+    /// Extract the reason string if `error` is a `TranscriptionError.providerFailed`
+    /// wrapping `GeminiError.contentBlocked`. Returns nil otherwise, so callers
+    /// can re-throw anything that isn't a soft policy block.
+    private static func blockedReason(in error: any Error) -> String? {
+        guard case TranscriptionError.providerFailed(_, let underlying) = error,
+              let geminiErr = underlying as? GeminiError,
+              case .contentBlocked(let reason) = geminiErr else {
+            return nil
+        }
+        return reason
+    }
+
     /// Decode Gemini's standard `{error: {code, message, status}}` envelope
     /// into a short, user-facing string. Falls back to a truncated raw body
     /// when the shape doesn't match (e.g. the gateway returned HTML).
@@ -657,6 +678,16 @@ actor GeminiProvider: TranscriptionProvider {
                 "Output truncated at maxOutputTokens. Try a shorter audio file, or switch to Gemini 2.5 Flash / Pro (more output headroom than Flash Lite)."
             ))
         }
+        // Gemini safety filters that block output entirely. Empty candidate
+        // text + one of these reasons means "model wanted to respond but a
+        // policy classifier stopped it" — typically a false positive on
+        // common phrases or quoted material. In batch mode the caller turns
+        // this into a placeholder segment for the chunk and keeps going;
+        // failing the whole batch over one filter trip would be wasteful
+        // (RECITATION on a single chunk threw away ~35 min of audio once).
+        if let finishReason, Self.blockedFinishReasons.contains(finishReason) {
+            throw TranscriptionError.providerFailed(name, underlying: GeminiError.contentBlocked(reason: finishReason))
+        }
         guard let inner = candidate?.content?.parts?.first?.text,
               let innerData = inner.data(using: .utf8) else {
             throw TranscriptionError.providerFailed(name, underlying: GeminiError.generateFailed(
@@ -772,6 +803,45 @@ actor GeminiProvider: TranscriptionProvider {
             guard FileManager.default.fileExists(atPath: stream.audioURL.path(percentEncoded: false)) else {
                 throw TranscriptionError.audioMissing(stream.audioURL)
             }
+        }
+
+        // Resume gate. If a prior run submitted a batch for this same set
+        // of streams and didn't finish (app quit, crash, transient error),
+        // re-attach to that batch instead of paying to upload + submit a
+        // fresh one. `resumeBatchFromMarker` short-circuits on terminal
+        // server-side states (404 / FAILED / EXPIRED) by throwing
+        // `GeminiResumeError.batchGone`; we delete the marker and fall
+        // through to the fresh path in that case. Any other error
+        // propagates so the marker survives for the next launch.
+        let meetingFolder = streams.first?.audioURL.deletingLastPathComponent()
+        if let folder = meetingFolder,
+           let marker = GeminiBatchPendingMarker.read(from: folder),
+           marker.matches(streams: streams) {
+            do {
+                return try await resumeBatchFromMarker(
+                    marker: marker,
+                    streams: streams,
+                    onProgress: onProgress,
+                    onStatus: onStatus
+                )
+            } catch let GeminiResumeError.batchGone(reason) {
+                NSLog("[Meeting/Transcribe] Gemini resume: marker stale (%@) — falling back to fresh submit", reason)
+                GeminiBatchPendingMarker.delete(in: folder)
+                let leaked = marker.chunkFileNames + [marker.jsonlFileName]
+                Task { [weak self] in
+                    guard let self else { return }
+                    for n in leaked { try? await self.deleteFile(name: n) }
+                }
+                // Fall through to the fresh-submit path below.
+            }
+        } else if let folder = meetingFolder,
+                  let stale = GeminiBatchPendingMarker.read(from: folder),
+                  !stale.matches(streams: streams) {
+            // Different streams than the marker covers (shouldn't happen
+            // for the same meeting folder, but be safe). Drop it and let
+            // the fresh path own this run.
+            NSLog("[Meeting/Transcribe] Gemini resume: marker streams don't match incoming — clearing")
+            GeminiBatchPendingMarker.delete(in: folder)
         }
 
         // Progress bands (within transcribeBatch's 0...1):
@@ -891,16 +961,12 @@ actor GeminiProvider: TranscriptionProvider {
         }
         onProgress?(uploadEnd)
 
-        // Best-effort cleanup of all chunk files when we're done.
+        // Track Files API names for cleanup at the end of a successful
+        // run (or on user cancel). Any other error path leaves them in
+        // place so the resume marker we write below can re-attach to the
+        // in-flight batch on the next launch — re-uploading would
+        // double-charge the user.
         let chunkFileNames = allUploaded.map(\.uploaded.name)
-        defer {
-            Task { [weak self] in
-                guard let self else { return }
-                for n in chunkFileNames {
-                    try? await self.deleteFile(name: n)
-                }
-            }
-        }
 
         // (3) Build combined JSONL. Key includes both stream + chunk
         // indices so parseCombinedBatchResponses can route each line.
@@ -919,11 +985,8 @@ actor GeminiProvider: TranscriptionProvider {
         let jsonlFile = try await uploadFile(at: jsonlURL, mimeOverride: "application/jsonl") { _ in }
         try await waitUntilActive(name: jsonlFile.name)
         onProgress?(jsonlUploadEnd)
-        defer {
-            Task { [weak self] in
-                try? await self?.deleteFile(name: jsonlFile.name)
-            }
-        }
+        // jsonlFile is cleaned up alongside chunks at the end of a
+        // successful run / on cancel — see the cleanup block below.
 
         // (4) Submit the batch.
         let batchName = try await submitBatch(inputFileName: jsonlFile.name)
@@ -931,37 +994,247 @@ actor GeminiProvider: TranscriptionProvider {
         NSLog("[Meeting/Transcribe] Gemini combined batch submitted: %@ (chunks=%d, streams=%d)",
               batchName, totalChunks, streams.count)
 
-        // (5) Poll until terminal.
-        let responsesFileName = try await pollBatch(
-            name: batchName,
-            onProgress: { fraction in
-                onProgress?(submitEnd + fraction * (pollEnd - submitEnd))
-            },
-            onStatus: onStatus
+        // Persist the resume marker as soon as the batch is submitted —
+        // before any chance of crashing during the (long) poll loop. If
+        // the app dies between here and pollBatch returning, the next
+        // launch will pick up the marker and re-attach via the resume
+        // gate at the top of this function.
+        let resumeStreams: [GeminiBatchPendingMarker.Stream] = streams.enumerated().map { sIdx, stream in
+            let chunks = perStreamChunks[sIdx] ?? []
+            return GeminiBatchPendingMarker.Stream(
+                audioFileName: stream.audioURL.lastPathComponent,
+                chunkOffsets: chunks.map(\.offset)
+            )
+        }
+        let pendingMarker = GeminiBatchPendingMarker(
+            batchName: batchName,
+            jsonlFileName: jsonlFile.name,
+            chunkFileNames: chunkFileNames,
+            streams: resumeStreams,
+            submittedAt: Date()
         )
-        onProgress?(pollEnd)
-
-        // (6) Download responses.
-        let responsesData = try await downloadFile(name: responsesFileName)
-        onProgress?(downloadEnd)
-        Task { [weak self] in
-            try? await self?.deleteFile(name: responsesFileName)
+        if let folder = meetingFolder {
+            do {
+                try pendingMarker.write(to: folder)
+            } catch {
+                NSLog("[Meeting/Transcribe] Gemini batch resume marker write failed: %@",
+                      String(describing: error))
+            }
         }
 
-        // (7) Parse + group by stream. Offsets are baked in by the
-        // parser so timestamps are absolute within each stream.
+        // Cleanup helper used by the success and cancel paths. On any
+        // OTHER error, the marker + Files API entries deliberately stay
+        // so the next launch can re-attach to the in-flight batch.
+        let cleanupRemoteAndMarker: @Sendable (String?) -> Void = { [weak self] responsesFileName in
+            var names = chunkFileNames + [jsonlFile.name]
+            if let r = responsesFileName { names.append(r) }
+            Task { [weak self] in
+                guard let self else { return }
+                for n in names { try? await self.deleteFile(name: n) }
+            }
+            if let folder = meetingFolder {
+                GeminiBatchPendingMarker.delete(in: folder)
+            }
+        }
+
+        do {
+            // (5) Poll until terminal.
+            let responsesFileName = try await pollBatch(
+                name: batchName,
+                onProgress: { fraction in
+                    onProgress?(submitEnd + fraction * (pollEnd - submitEnd))
+                },
+                onStatus: onStatus
+            )
+            onProgress?(pollEnd)
+
+            // (6) Download responses.
+            let responsesData = try await downloadFile(name: responsesFileName)
+            onProgress?(downloadEnd)
+
+            // (7) Parse + group by stream. Offsets are baked in by the
+            // parser so timestamps are absolute within each stream.
+            let segmentsByStream = try parseCombinedBatchResponses(
+                jsonlData: responsesData,
+                perStreamChunks: perStreamChunks
+            )
+            onProgress?(parseEnd)
+
+            // (8) Per-stream finalization — diarize when needed, build the
+            // TranscriptResult shape that callers expect.
+            var results: [URL: TranscriptResult] = [:]
+            // Only the streams that need diarization get a poll-able share of
+            // the remaining 0.95...1.00 band; mic/known-speaker streams finish
+            // instantly, so weighting by them would just stutter the bar.
+            let diarStreams = streams.enumerated().filter { $0.element.options.withDiarization }
+            let diarShare = diarStreams.isEmpty ? 0 : (1.0 - parseEnd) / Double(diarStreams.count)
+            var diarBaseline = parseEnd
+            for (sIdx, stream) in streams.enumerated() {
+                let cloud = segmentsByStream[sIdx] ?? []
+                if stream.options.withDiarization {
+                    let baseline = diarBaseline
+                    let span = diarShare
+                    let result = try await assembleResult(
+                        cloudSegments: cloud,
+                        audioURL: stream.audioURL,
+                        options: stream.options,
+                        diarizationProgress: { f in
+                            onProgress?(baseline + f * span)
+                        }
+                    )
+                    results[stream.audioURL] = result
+                    diarBaseline += span
+                } else {
+                    results[stream.audioURL] = try await assembleResult(
+                        cloudSegments: cloud,
+                        audioURL: stream.audioURL,
+                        options: stream.options,
+                        diarizationProgress: nil
+                    )
+                }
+            }
+            onProgress?(1.0)
+            cleanupRemoteAndMarker(responsesFileName)
+            return results
+        } catch is CancellationError {
+            // User-driven cancel — clean up so the next launch doesn't
+            // auto-resume something they explicitly stopped. The Gemini
+            // batch keeps running server-side; we just discard its output.
+            cleanupRemoteAndMarker(nil)
+            throw CancellationError()
+        } catch let urlErr as URLError where urlErr.code == .cancelled {
+            cleanupRemoteAndMarker(nil)
+            throw urlErr
+        }
+    }
+
+    /// One-shot GET on a batch resource. Returns parsed snapshot or throws
+    /// a `GeminiError.batchFailed` describing why the batch is unreachable.
+    /// Used by the resume path to short-circuit a 24 h `pollBatch` loop on
+    /// markers whose underlying batch has been retention-deleted (404) or
+    /// has already moved to a terminal state.
+    private nonisolated func fetchBatchSnapshot(name batchName: String) async throws -> BatchSnapshot {
+        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(batchName)")!
+        var req = URLRequest(url: url)
+        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        let (data, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw GeminiError.batchFailed("non-HTTP response from batch GET on \(batchName)")
+        }
+        if http.statusCode == 404 {
+            throw GeminiError.batchFailed("batch \(batchName) returned 404 — likely deleted server-side")
+        }
+        if http.statusCode != 200 {
+            let summary = Self.explainGeminiError(status: http.statusCode, body: data)
+            throw GeminiError.batchFailed("batch GET on \(batchName) — \(summary)")
+        }
+        return parseBatchSnapshot(data: data)
+    }
+
+    /// Resume a previously-submitted batch instead of paying to upload +
+    /// submit again. Pre-flights the batch (404 / terminal state → throws
+    /// `GeminiResumeError.batchGone` so the caller falls back to fresh
+    /// submit) and otherwise hands off to `pollBatch`. On success, deletes
+    /// the marker and best-effort cleans up Files API entries.
+    private func resumeBatchFromMarker(
+        marker: GeminiBatchPendingMarker,
+        streams: [TranscribeStream],
+        onProgress: (@Sendable (Double) -> Void)?,
+        onStatus: (@Sendable (TranscriptionSession.StageStatus) -> Void)?
+    ) async throws -> [URL: TranscriptResult] {
+        // Pre-flight. Cheap, and avoids a 24 h pollBatch loop on a marker
+        // whose batch has been retention-deleted by Google.
+        let snapshot: BatchSnapshot
+        do {
+            snapshot = try await fetchBatchSnapshot(name: marker.batchName)
+        } catch {
+            throw GeminiResumeError.batchGone(reason: "preflight failed: \(error.localizedDescription)")
+        }
+        if let state = snapshot.state,
+           state.hasSuffix("FAILED") || state.hasSuffix("CANCELLED") || state.hasSuffix("EXPIRED") {
+            throw GeminiResumeError.batchGone(reason: "batch state is \(state)")
+        }
+
+        onStatus?(TranscriptionSession.StageStatus(
+            updatedAt: Date(),
+            summary: "Reattaching to in-flight Gemini batch · \(marker.batchName)"
+        ))
+        NSLog("[Meeting/Transcribe] Gemini resume: reattaching to %@ (state=%@)",
+              marker.batchName, snapshot.state ?? "?")
+
+        // Resume-side progress bands. No prep / upload / submit — poll
+        // dominates, then download + parse + per-stream diarization.
+        let pollEnd: Double = 0.85
+        let downloadEnd: Double = 0.92
+        let parseEnd: Double = 0.95
+
+        // Reconstruct the `perStreamChunks` shape `parseCombinedBatchResponses`
+        // needs. Stream indices follow incoming order (mic = 0, output = 1)
+        // because that's how keys were assigned in `buildCombinedBatchJSONL`
+        // on the original submit run.
+        var perStreamChunks: [Int: [CloudAudioPrep.Chunk]] = [:]
+        let placeholderURL = URL(fileURLWithPath: "/tmp/__gemini_resume_placeholder__")
+        for (sIdx, stream) in streams.enumerated() {
+            let fileName = stream.audioURL.lastPathComponent
+            guard let storedStream = marker.streams.first(where: { $0.audioFileName == fileName }) else {
+                throw TranscriptionError.providerFailed(self.name, underlying: GeminiError.batchFailed(
+                    "resume marker missing entry for stream \(fileName)"
+                ))
+            }
+            // Only `offset` is read by parseCombinedBatchResponses; url +
+            // isTemp are unused on the resume path so a placeholder URL
+            // is fine.
+            perStreamChunks[sIdx] = storedStream.chunkOffsets.map { offset in
+                CloudAudioPrep.Chunk(url: placeholderURL, offset: offset, isTemp: false)
+            }
+        }
+
+        // Poll. Terminal-failure errors (batch transitioned to FAILED while
+        // polling, or 24h SLA exceeded) are mapped to batchGone so the
+        // caller can fall through to a fresh submit. Other errors (network)
+        // propagate unchanged so the marker survives for the next launch.
+        // Cancellation deletes the marker — user explicitly stopped the
+        // job, so don't auto-resume on next launch.
+        let responsesFileName: String
+        do {
+            responsesFileName = try await pollBatch(
+                name: marker.batchName,
+                onProgress: { onProgress?($0 * pollEnd) },
+                onStatus: onStatus
+            )
+        } catch is CancellationError {
+            if let folder = streams.first?.audioURL.deletingLastPathComponent() {
+                GeminiBatchPendingMarker.delete(in: folder)
+            }
+            throw CancellationError()
+        } catch let urlErr as URLError where urlErr.code == .cancelled {
+            if let folder = streams.first?.audioURL.deletingLastPathComponent() {
+                GeminiBatchPendingMarker.delete(in: folder)
+            }
+            throw urlErr
+        } catch let urlErr as URLError {
+            // Transient network — let the caller propagate. Marker stays.
+            throw urlErr
+        } catch let err as TranscriptionError {
+            if case let .providerFailed(_, underlying) = err,
+               underlying is GeminiError {
+                throw GeminiResumeError.batchGone(reason: err.localizedDescription)
+            }
+            throw err
+        }
+        onProgress?(pollEnd)
+
+        let responsesData = try await downloadFile(name: responsesFileName)
+        onProgress?(downloadEnd)
+
         let segmentsByStream = try parseCombinedBatchResponses(
             jsonlData: responsesData,
             perStreamChunks: perStreamChunks
         )
         onProgress?(parseEnd)
 
-        // (8) Per-stream finalization — diarize when needed, build the
-        // TranscriptResult shape that callers expect.
+        // Per-stream finalization (only output stream actually diarizes).
         var results: [URL: TranscriptResult] = [:]
-        // Only the streams that need diarization get a poll-able share of
-        // the remaining 0.95...1.00 band; mic/known-speaker streams finish
-        // instantly, so weighting by them would just stutter the bar.
         let diarStreams = streams.enumerated().filter { $0.element.options.withDiarization }
         let diarShare = diarStreams.isEmpty ? 0 : (1.0 - parseEnd) / Double(diarStreams.count)
         var diarBaseline = parseEnd
@@ -970,15 +1243,12 @@ actor GeminiProvider: TranscriptionProvider {
             if stream.options.withDiarization {
                 let baseline = diarBaseline
                 let span = diarShare
-                let result = try await assembleResult(
+                results[stream.audioURL] = try await assembleResult(
                     cloudSegments: cloud,
                     audioURL: stream.audioURL,
                     options: stream.options,
-                    diarizationProgress: { f in
-                        onProgress?(baseline + f * span)
-                    }
+                    diarizationProgress: { f in onProgress?(baseline + f * span) }
                 )
-                results[stream.audioURL] = result
                 diarBaseline += span
             } else {
                 results[stream.audioURL] = try await assembleResult(
@@ -989,6 +1259,20 @@ actor GeminiProvider: TranscriptionProvider {
                 )
             }
         }
+
+        // Done — best-effort cleanup of Files API entries we no longer
+        // need (chunks, JSONL, responses) and the local resume marker.
+        let cleanupNames = marker.chunkFileNames + [marker.jsonlFileName, responsesFileName]
+        Task { [weak self] in
+            guard let self else { return }
+            for n in cleanupNames {
+                try? await self.deleteFile(name: n)
+            }
+        }
+        if let folder = streams.first?.audioURL.deletingLastPathComponent() {
+            GeminiBatchPendingMarker.delete(in: folder)
+        }
+
         onProgress?(1.0)
         return results
     }
@@ -1068,8 +1352,28 @@ actor GeminiProvider: TranscriptionProvider {
                 continue
             }
             let envelopeData = try JSONSerialization.data(withJSONObject: response, options: [])
-            let segs = try parseSegmentsFromEnvelope(envelopeData: envelopeData)
             let offset = chunks[parsed.chunkIndex].offset
+            let segs: [CloudSegment]
+            do {
+                segs = try parseSegmentsFromEnvelope(envelopeData: envelopeData)
+            } catch {
+                if let reason = Self.blockedReason(in: error) {
+                    let end = (parsed.chunkIndex + 1 < chunks.count)
+                        ? chunks[parsed.chunkIndex + 1].offset
+                        : offset + 60
+                    NSLog("[Meeting/Transcribe] Gemini combined batch: stream %d chunk %d blocked (%@) — substituting placeholder %.1f…%.1fs",
+                          parsed.streamIndex, parsed.chunkIndex, reason, offset, end)
+                    let placeholder = CloudSegment(
+                        start: offset,
+                        end: end,
+                        text: "[Gemini ข้ามท่อนนี้: \(reason)]",
+                        language: nil
+                    )
+                    byStreamAndChunk[parsed.streamIndex, default: [:]][parsed.chunkIndex, default: []].append(placeholder)
+                    continue
+                }
+                throw error
+            }
             let absolute = segs.map {
                 CloudSegment(start: $0.start + offset, end: $0.end + offset, text: $0.text, language: $0.language)
             }
@@ -1645,9 +1949,26 @@ actor GeminiProvider: TranscriptionProvider {
                 continue
             }
             let envelopeData = try JSONSerialization.data(withJSONObject: response, options: [])
-            let segs = try parseSegmentsFromEnvelope(envelopeData: envelopeData)
             // Apply chunk offset so segments line up with the original audio.
             let offset = chunks[idx].offset
+            let segs: [CloudSegment]
+            do {
+                segs = try parseSegmentsFromEnvelope(envelopeData: envelopeData)
+            } catch {
+                if let reason = Self.blockedReason(in: error) {
+                    let end = (idx + 1 < chunks.count) ? chunks[idx + 1].offset : offset + 60
+                    NSLog("[Meeting/Transcribe] Gemini batch: chunk %d blocked (%@) — substituting placeholder %.1f…%.1fs",
+                          idx, reason, offset, end)
+                    byIndex[idx, default: []].append(CloudSegment(
+                        start: offset,
+                        end: end,
+                        text: "[Gemini ข้ามท่อนนี้: \(reason)]",
+                        language: nil
+                    ))
+                    continue
+                }
+                throw error
+            }
             byIndex[idx, default: []] += segs.map {
                 CloudSegment(start: $0.start + offset, end: $0.end + offset, text: $0.text, language: $0.language)
             }
@@ -1764,12 +2085,108 @@ actor GeminiProvider: TranscriptionProvider {
 
 // MARK: - Errors
 
+// =============================================================================
+// MARK: - Resume sidecar
+// =============================================================================
+
+/// Sidecar written to `<meetingFolder>/gemini_batch_pending.json` after a
+/// Gemini batch has been submitted but before it has finished. Lets the
+/// next app launch reattach to the same batch instead of re-uploading the
+/// audio chunks and submitting a new (paid) batch — the in-flight batch
+/// runs server-side regardless of whether our app is alive, so the only
+/// thing keeping us from waiting it out is local state being lost on quit.
+///
+/// Lifecycle:
+/// - Written right after `submitBatch` returns the batch resource name.
+/// - Read on entry to `transcribeCombinedBatch` (and on app launch via
+///   the queue's orphan-marker scan, which already drives the per-job
+///   `transcription_pending.json`).
+/// - Deleted on success (after parse + diarize) or on explicit cancel.
+/// - Left in place on transient/network errors so the next launch can
+///   keep polling. Terminal batch states (FAILED / EXPIRED / 404) are
+///   detected on resume and clear the marker before falling back to a
+///   fresh submit.
+struct GeminiBatchPendingMarker: Codable, Sendable {
+    let batchName: String
+    /// Files API resource name (`files/...`) of the JSONL request file.
+    /// Tracked so we can clean it up after the batch terminates.
+    let jsonlFileName: String
+    /// Files API resource names of every uploaded audio chunk, across
+    /// all streams. Cleaned up after the batch terminates.
+    let chunkFileNames: [String]
+    /// Per-stream chunk topology — used by `parseCombinedBatchResponses`
+    /// to baseline timestamps when we resume after a restart and no
+    /// longer have the in-memory `perStreamChunks` from the original run.
+    let streams: [Stream]
+    let submittedAt: Date
+
+    struct Stream: Codable, Sendable {
+        /// Last path component of the stream's audio URL, e.g. `mic.m4a`.
+        /// Used to match incoming streams on resume.
+        let audioFileName: String
+        /// Offsets per chunk in source-audio seconds, indexed by chunkIdx
+        /// (matches the `s<i>-c<j>` keys we wrote to the JSONL).
+        let chunkOffsets: [TimeInterval]
+    }
+
+    private static let filename = "gemini_batch_pending.json"
+
+    static func url(in folder: URL) -> URL {
+        folder.appendingPathComponent(filename)
+    }
+
+    static func exists(in folder: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url(in: folder).path(percentEncoded: false))
+    }
+
+    static func read(from folder: URL) -> GeminiBatchPendingMarker? {
+        guard let data = try? Data(contentsOf: url(in: folder)) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(GeminiBatchPendingMarker.self, from: data)
+    }
+
+    func write(to folder: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(self)
+        try data.write(to: Self.url(in: folder), options: .atomic)
+    }
+
+    static func delete(in folder: URL) {
+        try? FileManager.default.removeItem(at: url(in: folder))
+    }
+
+    /// True iff this marker covers the same set of audio streams as the
+    /// incoming `transcribeBatch` call. Routing back to streams happens
+    /// by filename, so we just check the sets match — order can differ.
+    func matches(streams: [TranscribeStream]) -> Bool {
+        let incoming = Set(streams.map { $0.audioURL.lastPathComponent })
+        let stored = Set(self.streams.map(\.audioFileName))
+        return incoming == stored
+    }
+}
+
+/// Internal signal that a resume attempt found the server-side batch in
+/// a state we can't recover from (404, EXPIRED, FAILED, CANCELLED), and
+/// the caller should fall back to a fresh submit. Distinct from regular
+/// errors so transient failures (network blips during poll) don't trigger
+/// a re-submission and double-charge the user.
+private enum GeminiResumeError: Error {
+    case batchGone(reason: String)
+}
+
 private enum GeminiError: LocalizedError {
     case uploadFailed(String)
     case fileProcessingFailed
     case fileProcessingTimeout
     case generateFailed(String)
     case batchFailed(String)
+    /// Gemini's safety / policy filter suppressed the output on a single
+    /// chunk. Batch parsers catch this and substitute a placeholder so the
+    /// rest of the transcript survives; the sync path lets it bubble up.
+    case contentBlocked(reason: String)
 
     var errorDescription: String? {
         switch self {
@@ -1778,6 +2195,7 @@ private enum GeminiError: LocalizedError {
         case .fileProcessingTimeout: "Gemini did not finish processing the file within the timeout."
         case .generateFailed(let msg): "Gemini generateContent failed: \(msg)"
         case .batchFailed(let msg): "Gemini batch failed: \(msg)"
+        case .contentBlocked(let reason): "Gemini blocked output (finishReason=\(reason))."
         }
     }
 }
