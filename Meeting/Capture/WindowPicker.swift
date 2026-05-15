@@ -178,66 +178,88 @@ struct WindowPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                if model.isLoading {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Text("\(model.windows.count) windows")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.textFaint)
-                }
-                Spacer()
-                Button {
-                    Task { await model.refresh() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.brandAccent)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Refresh window list")
-            }
-
+            header
             if let error = model.loadError {
                 Text(error)
                     .foregroundStyle(.red)
                     .font(.system(size: 10))
             }
-
-            ScrollView(showsIndicators: true) {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(groupedByApp(), id: \.appName) { group in
-                        AppHeader(group: group, model: model)
-                            .padding(.top, 4)
-                        ForEach(group.windows, id: \.windowID) { window in
-                            WindowRow(
-                                window: window,
-                                isSelected: model.selectedSource == .window(window.windowID),
-                                onSelect: { model.selectedSource = .window(window.windowID) }
-                            )
-                        }
-                    }
-                }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
-            }
-            .frame(height: 180)
-            .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(0.05))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
-                    }
-            }
+            listBody
         }
         .task {
-            if model.windows.isEmpty {
+            if model.windows.isEmpty && model.displays.isEmpty {
                 await model.refresh()
             }
+        }
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        HStack(spacing: 6) {
+            if model.isLoading {
+                ProgressView().controlSize(.small)
+            } else {
+                let total = model.windows.count + model.displays.count
+                Text("\(total) sources")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.textFaint)
+            }
+            Spacer()
+            Button {
+                Task { await model.refresh() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.brandAccent)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Refresh source list")
+        }
+    }
+
+    @ViewBuilder
+    private var listBody: some View {
+        ScrollView(showsIndicators: true) {
+            LazyVStack(alignment: .leading, spacing: 1) {
+                if !model.displays.isEmpty {
+                    DisplaysHeader(count: model.displays.count)
+                        .padding(.top, 4)
+                    ForEach(model.displays, id: \.displayID) { display in
+                        DisplayRow(
+                            display: display,
+                            isSelected: model.selectedSource == .display(display.displayID),
+                            onSelect: {
+                                model.selectedSource = .display(display.displayID)
+                            }
+                        )
+                    }
+                }
+                ForEach(groupedByApp(), id: \.appName) { group in
+                    AppHeader(group: group, model: model)
+                        .padding(.top, 4)
+                    ForEach(group.windows, id: \.windowID) { window in
+                        WindowRow(
+                            window: window,
+                            isSelected: model.selectedSource == .window(window.windowID),
+                            onSelect: { model.selectedSource = .window(window.windowID) }
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 4)
+        }
+        .frame(height: 180)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                }
         }
     }
 
@@ -315,5 +337,70 @@ private struct WindowRow: View {
 
     private var dimensions: String {
         "\(Int(window.frame.width))×\(Int(window.frame.height))"
+    }
+}
+
+private struct DisplaysHeader: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "display")
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 14, height: 14)
+                .foregroundStyle(Color.brandAccent)
+            Text("Displays")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.textPrimary)
+            Text("(\(count))")
+                .font(.system(size: 10))
+                .foregroundStyle(Color.textFaint)
+            Spacer()
+        }
+        .padding(.horizontal, 6)
+    }
+}
+
+private struct DisplayRow: View {
+    let display: SCDisplay
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 6) {
+                Spacer().frame(width: 18)
+                Text(CaptureSource.displayLabel(displayID: display.displayID))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Text(dimensions)
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(Color.textFaint)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.brandAccent)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.brandAccent.opacity(0.14))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var dimensions: String {
+        "\(Int(display.frame.width))×\(Int(display.frame.height))"
     }
 }
