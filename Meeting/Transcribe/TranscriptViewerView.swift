@@ -113,6 +113,12 @@ private struct TranscriptMainPane: View {
         .onAppear {
             playerModel.load(folder: meeting.folder)
         }
+        .onDisappear {
+            // Stop AV rendering immediately so the back-to-Library
+            // transition isn't blocked on composition teardown.
+            playerModel.teardown()
+            samplePlayer.stop()
+        }
     }
 
     private var hitCount: Int? {
@@ -1830,6 +1836,18 @@ final class VideoPlayerModel: ObservableObject {
         let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance)
         player.play()
+    }
+
+    /// Pause + detach observers + drop the player so the view-back
+    /// transition doesn't wait on AVFoundation to tear down a playing
+    /// composition mid-render. Safe to call from `.onDisappear`; the
+    /// next `.onAppear` will rebuild via `load(folder:)`.
+    func teardown() {
+        player?.pause()
+        rateObservation?.invalidate()
+        rateObservation = nil
+        player = nil
+        loadedFolder = nil
     }
 }
 
