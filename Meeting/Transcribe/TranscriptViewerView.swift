@@ -1204,11 +1204,13 @@ private struct ContextPanel: View {
             }
 
             if isExpanded {
+                let images = meeting.contextItems.filter { $0.kind == .image }
                 VStack(spacing: 4) {
                     ForEach(meeting.contextItems) { item in
                         ContextItemRow(
                             item: item,
                             meetingFolder: meeting.folder,
+                            siblingImages: images,
                             onDelete: {
                                 library.deleteContextItem(
                                     meeting: meeting.id,

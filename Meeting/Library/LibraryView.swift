@@ -907,6 +907,7 @@ struct ContextItemsSection: View {
                     ContextItemRow(
                         item: item,
                         meetingFolder: meeting.folder,
+                        siblingImages: imageItems,
                         onDelete: {
                             library.deleteContextItem(
                                 meeting: meeting.id,
@@ -918,14 +919,21 @@ struct ContextItemsSection: View {
             }
         }
     }
+
+    private var imageItems: [ContextItem] {
+        meeting.contextItems.filter { $0.kind == .image }
+    }
 }
 
 /// One row in the context list. Used by both the Library detail (read-
 /// only) and the Transcript Viewer (with delete). `onDelete == nil`
-/// hides the trailing trash button.
+/// hides the trailing trash button. `siblingImages` lists every other
+/// image captured in the same meeting so a double-click on an image row
+/// can open Quick Look with arrow-key navigation across them.
 struct ContextItemRow: View {
     let item: ContextItem
     let meetingFolder: URL
+    var siblingImages: [ContextItem] = []
     var onDelete: (() -> Void)? = nil
 
     var body: some View {
@@ -1049,11 +1057,7 @@ struct ContextItemRow: View {
                 NSWorkspace.shared.open(url)
             }
         case .image:
-            if let filename = item.imageFilename {
-                let url = ContextCaptureFile.imagesFolder(in: meetingFolder)
-                    .appendingPathComponent(filename)
-                NSWorkspace.shared.activateFileViewerSelecting([url])
-            }
+            previewImage()
         case .text:
             // Plain text — copy back to clipboard for the user's
             // convenience. No side effect on disk.
@@ -1072,6 +1076,24 @@ struct ContextItemRow: View {
         return h > 0
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%d:%02d", m, s)
+    }
+
+    /// Open the native Quick Look panel focused on this row's image, with
+    /// every other image captured in the meeting as the navigable dataset
+    /// so arrow keys flip through the captures. Falls back gracefully to
+    /// a single-image dataset when the caller didn't pass siblings.
+    private func previewImage() {
+        let images = siblingImages.isEmpty ? [item] : siblingImages
+        let folder = ContextCaptureFile.imagesFolder(in: meetingFolder)
+        let urls: [URL] = images.compactMap { i in
+            guard i.kind == .image, let name = i.imageFilename else { return nil }
+            let url = folder.appendingPathComponent(name)
+            return FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
+                ? url : nil
+        }
+        guard !urls.isEmpty else { return }
+        let index = urls.firstIndex { $0.lastPathComponent == item.imageFilename } ?? 0
+        QuickLookController.shared.present(images: urls, startAt: index)
     }
 }
 
