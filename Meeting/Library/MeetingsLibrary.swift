@@ -264,38 +264,29 @@ final class MeetingsLibrary: ObservableObject {
         rescan()
     }
 
-    /// User manually maps a speaker → person (not from suggestion). When an
-    /// embedding is already cached for this speaker, either reuse an existing
-    /// identity (email or displayName match) and fold this sample in, or
-    /// create a new identity. If no embedding is available yet, just sets
-    /// displayName — identity creation will happen when the embedding lands
-    /// (on next manual edit after EmbeddingExtractionQueue completes).
-    func createOrReuseIdentity(
-        speakerID: SpeakerID,
-        displayName: String,
-        email: String?,
-        meeting: MeetingRecord.ID
-    ) {
-        guard let store = identityStore else {
-            updateSpeaker(meeting: meeting, speakerID: speakerID) { p in
-                p.displayName = displayName
-                if let email { p.email = email }
-            }
-            return
-        }
+    /// After the caller writes a speaker's displayName/email via `updateSpeaker`,
+    /// fold the speaker's embedding into a global identity. Either reuses an
+    /// existing identity (matched by email or by case-insensitive displayName)
+    /// or mints a new one. Idempotent: if no embedding is cached yet or no
+    /// identity store is wired up, this is a no-op. Doesn't overwrite the
+    /// speaker's attendeeId/email/role — those were already set by the caller.
+    func linkOrCreateIdentity(speakerID: SpeakerID, meeting: MeetingRecord.ID) {
+        guard let store = identityStore else { return }
         guard let m = meetings.first(where: { $0.id == meeting }) else { return }
+        // Pull the just-written profile from disk so we see the caller's edit.
+        guard let profile = (try? SpeakerMapFile.read(from: m.folder))?
+                .speakers.first(where: { $0.id == speakerID })
+        else { return }
+        // Skip if already linked.
+        if profile.identityID != nil { return }
+        // Skip if displayName is still a raw "speaker_N" — nothing to link to.
+        if profile.displayName.hasPrefix("speaker_") { return }
         guard let embFile = try? MeetingEmbeddingsFile.read(from: m.folder),
               let emb = embFile.embeddings.first(where: { $0.speakerID == speakerID })
-        else {
-            updateSpeaker(meeting: meeting, speakerID: speakerID) { p in
-                p.displayName = displayName
-                if let email { p.email = email }
-            }
-            return
-        }
+        else { return }
 
-        let lowerName = displayName.lowercased()
-        let lowerEmail = email?.lowercased()
+        let lowerName = profile.displayName.lowercased()
+        let lowerEmail = profile.email?.lowercased()
         let existing = store.identities.first { ident in
             if let lowerEmail, ident.emails.contains(lowerEmail) { return true }
             return ident.displayName.lowercased() == lowerName
@@ -314,17 +305,15 @@ final class MeetingsLibrary: ObservableObject {
             identityID = existing.id
         } else {
             identityID = store.create(
-                displayName: displayName,
-                email: email,
+                displayName: profile.displayName,
+                email: profile.email,
                 centroid: emb.centroid,
                 sampleSeconds: emb.sampleSeconds,
                 meetingFolder: m.folder.lastPathComponent
             )
         }
-        updateSpeaker(meeting: meeting, speakerID: speakerID) { profile in
-            profile.displayName = displayName
-            profile.identityID = identityID
-            if let email { profile.email = email }
+        updateSpeaker(meeting: meeting, speakerID: speakerID) { p in
+            p.identityID = identityID
         }
     }
 

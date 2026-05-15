@@ -371,10 +371,135 @@ private struct RecordingTab: View {
                     label: \.displayName
                 )
             }
+
+            IdentityMatchingSection()
         }
         .task {
             devices = AudioInputDevices.enumerate()
         }
+    }
+}
+
+// MARK: - Identity Matching
+
+private struct IdentityMatchingSection: View {
+    @ObservedObject private var prefs = AppPreferences.shared
+    @EnvironmentObject private var identityStore: IdentityStore
+    @State private var showingManage = false
+    @State private var confirmingReset = false
+
+    var body: some View {
+        SettingsSection(label: "Identity matching") {
+            ToggleRow(
+                title: "Suggest speakers from past meetings",
+                description: "After each transcribe, embed each diarized speaker and surface chips in the Transcript Viewer when their voice matches a previously-named speaker.",
+                isOn: Binding(
+                    get: { prefs.identitySuggestionsEnabled },
+                    set: { prefs.identitySuggestionsEnabled = $0 }
+                )
+            )
+            Divider().opacity(0.4)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Suggestion threshold")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Conservative suggests less but is more accurate. Aggressive surfaces more candidates that may need rejection.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textDim)
+                }
+                Spacer()
+                Slider(
+                    value: Binding(
+                        get: { prefs.identityMinSuggestScore },
+                        set: { prefs.identityMinSuggestScore = $0 }
+                    ),
+                    in: 0.45...0.70,
+                    step: 0.05
+                )
+                .frame(width: 160)
+                .disabled(!prefs.identitySuggestionsEnabled)
+            }
+            Divider().opacity(0.4)
+            HStack {
+                Text("Stored identities: \(identityStore.identities.count)")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.textDim)
+                Spacer()
+                Button("Manage…") { showingManage = true }
+                    .disabled(identityStore.identities.isEmpty)
+                Button("Reset all…") { confirmingReset = true }
+                    .foregroundStyle(Color.recordRed)
+                    .disabled(identityStore.identities.isEmpty)
+            }
+        }
+        .sheet(isPresented: $showingManage) {
+            ManageIdentitiesView()
+        }
+        .alert("Reset all identities?", isPresented: $confirmingReset) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset", role: .destructive) {
+                identityStore.reset()
+                deleteAllEmbeddingsFiles()
+            }
+        } message: {
+            Text("Deletes every saved voice fingerprint and per-meeting embedding cache. Can't be undone.")
+        }
+    }
+
+    private func deleteAllEmbeddingsFiles() {
+        let root = AppPreferences.shared.meetingsFolderURL
+        guard let folders = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil
+        ) else { return }
+        for f in folders {
+            let url = f.appendingPathComponent(MeetingEmbeddingsFile.filename)
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+}
+
+private struct ManageIdentitiesView: View {
+    @EnvironmentObject private var identityStore: IdentityStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Stored Identities")
+                .font(.system(size: 18, weight: .semibold))
+            if identityStore.identities.isEmpty {
+                Text("No identities saved yet.")
+                    .foregroundStyle(Color.textDim)
+            } else {
+                List(identityStore.identities) { identity in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(identity.displayName).font(.system(size: 13, weight: .medium))
+                            Text("\(identity.meetingCount) meetings · last seen \(relativeDate(identity.updatedAt))")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.textDim)
+                        }
+                        Spacer()
+                        Button("Forget") { identityStore.delete(id: identity.id) }
+                            .foregroundStyle(Color.recordRed)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(minHeight: 240)
+            }
+            HStack {
+                Spacer()
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 480, minHeight: 360)
+    }
+
+    private func relativeDate(_ d: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f.localizedString(for: d, relativeTo: Date())
     }
 }
 

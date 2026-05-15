@@ -60,6 +60,7 @@ private struct TranscriptMainPane: View {
     /// relied on (which left both streams audible for ~16-50ms).
     @StateObject private var samplePlayer = SpeakerSamplePlayer()
     @AppStorage("transcript.viewer.columnWidth") private var columnWidth: Double = 560
+    @State private var suggestionBannerDismissed: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,6 +68,10 @@ private struct TranscriptMainPane: View {
                 meeting: meeting,
                 hitCount: hitCount,
                 search: $search
+            )
+            IdentitySuggestionBanner(
+                meeting: meeting,
+                dismissed: $suggestionBannerDismissed
             )
             if let transcript {
                 HStack(alignment: .top, spacing: 0) {
@@ -691,6 +696,17 @@ private struct SpeakersPanel: View {
                             apply(attendeeID: attendeeID, to: speaker.id)
                         }
                     )
+                    // Suggestion chip — surfaces under speakers that the
+                    // matcher believes match a previously-named voice.
+                    if let suggestion = meeting.identitySuggestions.first(where: { $0.speakerID == speaker.id }) {
+                        IdentitySuggestionChip(
+                            suggestion: suggestion,
+                            allSuggestions: meeting.identitySuggestions.filter { $0.speakerID == speaker.id },
+                            onConfirm: { s in library.applyIdentitySuggestion(s, meeting: meeting.id) },
+                            onReject: { s in library.rejectIdentitySuggestion(s, meeting: meeting.id) }
+                        )
+                        .padding(.leading, 32)
+                    }
                 }
             }
         }
@@ -810,6 +826,10 @@ private struct SpeakersPanel: View {
         library.updateSpeaker(meeting: meeting.id, speakerID: id) { profile in
             profile.displayName = trimmed
         }
+        // Fold this speaker's voice into a global identity (creates one if
+        // none matches). No-op when embeddings aren't cached yet — the link
+        // attempt is replayed on the next manual edit.
+        library.linkOrCreateIdentity(speakerID: id, meeting: meeting.id)
         editingID = nil
     }
 
@@ -839,6 +859,7 @@ private struct SpeakersPanel: View {
             profile.email = attendee.email
             profile.role = attendee.role
         }
+        library.linkOrCreateIdentity(speakerID: id, meeting: meeting.id)
     }
 
     private func lookupAttendee(id: String) -> CalendarAttendee? {
@@ -1903,5 +1924,99 @@ private extension String {
             range = found.upperBound..<endIndex
         }
         return count
+    }
+}
+
+// MARK: - Identity Suggestion Chip
+
+/// Inline chip under a `speaker_N` row when the matcher believes that
+/// speaker matches a previously-named voice. ✓ confirms (applies the
+/// mapping + updates the global centroid); ✗ adds a per-meeting rejection
+/// so the same pair won't be suggested again here.
+private struct IdentitySuggestionChip: View {
+    let suggestion: IdentitySuggestion
+    let allSuggestions: [IdentitySuggestion]
+    let onConfirm: (IdentitySuggestion) -> Void
+    let onReject: (IdentitySuggestion) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.brandAccent)
+            Text("น่าจะเป็น ")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.textDim)
+            + Text(suggestion.identityDisplayName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.textPrimary)
+            + Text(" · \(suggestion.confidencePercent)%")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.textDim)
+            Spacer(minLength: 4)
+            Button(action: { onConfirm(suggestion) }) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color.brandSuccess)
+            }
+            .buttonStyle(.plain)
+            .help("ยืนยัน")
+            Button(action: { onReject(suggestion) }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color.textFaint)
+            }
+            .buttonStyle(.plain)
+            .help("ปิด")
+            if allSuggestions.count > 1 {
+                Menu {
+                    ForEach(Array(allSuggestions.dropFirst().prefix(2)), id: \.id) { s in
+                        Button("\(s.identityDisplayName) · \(s.confidencePercent)%") {
+                            onConfirm(s)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.textFaint)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 22)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.brandAccent.opacity(0.08))
+        )
+    }
+}
+
+/// Top-of-viewer banner that summarizes how many suggestions are pending
+/// when ≥2 speakers have one. Lets the user dismiss it for the session
+/// (state is in-memory; reopening the viewer brings it back).
+private struct IdentitySuggestionBanner: View {
+    let meeting: MeetingRecord
+    @Binding var dismissed: Bool
+
+    var body: some View {
+        let count = meeting.identitySuggestions.count
+        if count >= 2 && !dismissed {
+            HStack(spacing: 8) {
+                Image(systemName: "lightbulb")
+                    .foregroundStyle(Color.brandAccent)
+                Text("พบ \(count) suggestion จากผู้พูดในมีตติ้งอื่น — เลื่อนดูในการ์ด Speakers")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.textPrimary)
+                Spacer()
+                Button("ปิด") { dismissed = true }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color.brandAccent.opacity(0.08))
+        }
     }
 }
