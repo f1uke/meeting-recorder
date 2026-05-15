@@ -261,12 +261,6 @@ final class RecordingSession: ObservableObject {
         NSLog("[Meeting/Session] start: ALL READY — state=recording")
     }
 
-    /// Temporary compat shim — removed in Task 7 when the call site
-    /// migrates to start(source:event:).
-    func start(window: SCWindow, event: CalendarEvent? = nil) async {
-        await start(source: .window(window), event: event)
-    }
-
     /// User-facing escape hatch from the .starting state. Called by the
     /// "Cancel start" button in PopoverTransientView when the spinner
     /// has been showing for an unreasonably long time.

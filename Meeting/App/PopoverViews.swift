@@ -60,7 +60,7 @@ struct PopoverIdleView: View {
                     Text("Start Recording")
                 }
             }
-            .disabled(picker.selectedWindow == nil)
+            .disabled(picker.selectedCaptureSource == nil)
 
             if let error = recording.errorMessage {
                 ErrorBanner(message: error)
@@ -72,11 +72,11 @@ struct PopoverIdleView: View {
             }
         }
         .task {
-            if picker.windows.isEmpty {
+            if picker.windows.isEmpty && picker.displays.isEmpty {
                 await picker.refresh()
             }
         }
-        .onChange(of: picker.selectedWindow?.windowID) { _, _ in
+        .onChange(of: picker.selectedSource) { _, _ in
             autoPickEventIfNeeded()
         }
         .onChange(of: calendar.relevantEvents) { _, _ in
@@ -133,7 +133,12 @@ struct PopoverIdleView: View {
 
     private func autoPickEventIfNeeded() {
         guard eventIsAutoSelected else { return }
-        let bundleID = picker.selectedWindow?.owningApplication?.bundleIdentifier
+        let bundleID: String?
+        if case .window(let win) = picker.selectedCaptureSource {
+            bundleID = win.owningApplication?.bundleIdentifier
+        } else {
+            bundleID = nil
+        }
         let best = CalendarMatcher.bestMatch(
             events: calendar.relevantEvents,
             now: Date(),
@@ -143,9 +148,9 @@ struct PopoverIdleView: View {
     }
 
     private func startRecording() {
-        guard let win = picker.selectedWindow else { return }
+        guard let source = picker.selectedCaptureSource else { return }
         let event = selectedEvent
-        Task { await recording.start(window: win, event: event) }
+        Task { await recording.start(source: source, event: event) }
     }
 }
 

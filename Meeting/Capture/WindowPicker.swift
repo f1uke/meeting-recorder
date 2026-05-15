@@ -34,13 +34,6 @@ final class WindowPickerModel: ObservableObject {
         }
     }
 
-    /// Compat shim for callers that haven't migrated to
-    /// `selectedCaptureSource` yet (PopoverIdleView). Removed in Task 7.
-    var selectedWindow: SCWindow? {
-        if case .window(let win) = selectedCaptureSource { return win }
-        return nil
-    }
-
     func icon(for window: SCWindow) -> NSImage? {
         guard let pid = window.owningApplication?.processID else { return nil }
         if let cached = iconCache[pid] { return cached }
