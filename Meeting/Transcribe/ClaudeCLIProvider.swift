@@ -304,7 +304,7 @@ actor ClaudeCLIProvider: LLMProvider {
         }
         if hasImages {
             lines.append("")
-            lines.append("Image files are at the listed relative paths from your working directory; you may Read them if visual context would meaningfully change the summary.")
+            lines.append("Image files are at the listed relative paths from your working directory; you need to Read them if visual context would meaningfully change the summary.")
         }
         if hasJira {
             lines.append("")
