@@ -80,7 +80,8 @@ final class MeetingsLibrary: ObservableObject {
 
     /// Rescan disk and refresh `meetings`. Called on file-system events
     /// and from `AppState.stopAndTranscribe()` once transcription writes
-    /// the per-meeting JSONs.
+    /// the per-meeting JSONs. For single-meeting edits prefer
+    /// `refreshMeeting(folder:)` — full rescan reads every meeting folder.
     func rescan() {
         let folders = (try? FileManager.default.contentsOfDirectory(
             at: meetingsRoot,
@@ -113,6 +114,36 @@ final class MeetingsLibrary: ObservableObject {
         }
     }
 
+    /// Reload a single meeting from disk and splice it into `meetings`.
+    /// Much cheaper than `rescan()` — touches one folder's seven JSONs
+    /// instead of all 27+ meetings. Use this after edits that only
+    /// affect one meeting's `speakers.json` / `embeddings.json` etc.
+    ///
+    /// If the folder is gone, the meeting is dropped from the list.
+    func refreshMeeting(folder: URL) {
+        let identitiesSnapshot = identityStore?.identities ?? []
+        let updated = Self.loadRecord(
+            folder: folder,
+            override: overrides.meetings[folder.lastPathComponent],
+            identities: identitiesSnapshot,
+            embeddingQueue: embeddingQueue,
+            matchingConfig: matchingConfig
+        )
+        if let idx = meetings.firstIndex(where: { $0.folder == folder }) {
+            if let updated {
+                meetings[idx] = updated
+            } else {
+                meetings.remove(at: idx)
+                if selection == folder.lastPathComponent { selection = nil }
+            }
+        } else if let updated {
+            // New folder — splice in by recordedAt sort order.
+            let insertIdx = meetings.firstIndex(where: { $0.recordedAt < updated.recordedAt })
+                ?? meetings.endIndex
+            meetings.insert(updated, at: insertIdx)
+        }
+    }
+
     /// Update user metadata for a meeting. Persists to `library.json`
     /// atomically and triggers a UI refresh.
     func update(meeting id: MeetingRecord.ID, transform: (inout MeetingOverride) -> Void) {
@@ -129,13 +160,20 @@ final class MeetingsLibrary: ObservableObject {
     }
 
     /// Replace one speaker's profile in `<meeting>/speakers.json` and
-    /// rescan. The transform receives the existing profile (or a fresh
-    /// default seeded from the transcript's speaker label) so callers
-    /// can mutate just the field they care about — display name,
-    /// attendee mapping, etc. — without clobbering the others.
+    /// refresh the affected meeting only. The transform receives the
+    /// existing profile (or a fresh default seeded from the transcript's
+    /// speaker label) so callers can mutate just the field they care
+    /// about — display name, attendee mapping, etc. — without
+    /// clobbering the others.
+    ///
+    /// `refresh: false` skips the per-meeting refresh — useful when the
+    /// caller is about to make another edit (e.g. linkOrCreateIdentity
+    /// does updateSpeaker → identity store update → updateSpeaker again)
+    /// and only the final state should be reflected in the UI.
     func updateSpeaker(
         meeting id: MeetingRecord.ID,
         speakerID: SpeakerID,
+        refresh: Bool = true,
         transform: (inout SpeakerProfile) -> Void
     ) {
         guard let meeting = meetings.first(where: { $0.id == id }) else { return }
@@ -158,7 +196,9 @@ final class MeetingsLibrary: ObservableObject {
             NSLog("[Meeting/Library] speakers.json write failed: %@",
                   String(describing: error))
         }
-        rescan()
+        if refresh {
+            refreshMeeting(folder: meeting.folder)
+        }
     }
 
     /// Drop a context item from `<meeting>/context.json` and rescan.
@@ -236,13 +276,15 @@ final class MeetingsLibrary: ObservableObject {
             newSampleSeconds: emb.sampleSeconds,
             meetingFolder: m.folder.lastPathComponent
         )
-        updateSpeaker(meeting: meeting, speakerID: suggestion.speakerID) { profile in
+        // refresh: false here, then refresh once after — one reload total
+        updateSpeaker(meeting: meeting, speakerID: suggestion.speakerID, refresh: false) { profile in
             profile.displayName = identity.displayName
             profile.identityID = identity.id
             if profile.email == nil, let email = identity.emails.first {
                 profile.email = email
             }
         }
+        refreshMeeting(folder: m.folder)
     }
 
     /// User dismissed a suggestion. Appended to per-meeting rejection log
@@ -261,7 +303,7 @@ final class MeetingsLibrary: ObservableObject {
             identityID: suggestion.identityID
         ))
         try? embFile.write(to: m.folder)
-        rescan()
+        refreshMeeting(folder: m.folder)
     }
 
     /// After the caller writes a speaker's displayName/email via `updateSpeaker`,
@@ -283,7 +325,12 @@ final class MeetingsLibrary: ObservableObject {
         if profile.displayName.hasPrefix("speaker_") { return }
         guard let embFile = try? MeetingEmbeddingsFile.read(from: m.folder),
               let emb = embFile.embeddings.first(where: { $0.speakerID == speakerID })
-        else { return }
+        else {
+            // No embedding cached yet — still call refresh so any prior
+            // updateSpeaker(refresh: false) edit shows up.
+            refreshMeeting(folder: m.folder)
+            return
+        }
 
         let lowerName = profile.displayName.lowercased()
         let lowerEmail = profile.email?.lowercased()
@@ -312,9 +359,12 @@ final class MeetingsLibrary: ObservableObject {
                 meetingFolder: m.folder.lastPathComponent
             )
         }
-        updateSpeaker(meeting: meeting, speakerID: speakerID) { p in
+        // refresh: false then refresh once at the end — keeps a single
+        // reload regardless of how many disk writes ran during link.
+        updateSpeaker(meeting: meeting, speakerID: speakerID, refresh: false) { p in
             p.identityID = identityID
         }
+        refreshMeeting(folder: m.folder)
     }
 
     /// Searched meetings used by the list column.

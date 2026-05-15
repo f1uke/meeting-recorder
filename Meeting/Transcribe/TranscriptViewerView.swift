@@ -823,12 +823,11 @@ private struct SpeakersPanel: View {
         // Manual rename only touches the display name — leave any
         // existing attendee mapping (email, role) intact so a small
         // typo fix doesn't unmap "Pim" from pim@example.com.
-        library.updateSpeaker(meeting: meeting.id, speakerID: id) { profile in
+        // refresh: false — linkOrCreateIdentity below does the single
+        // final refresh, keeping the map gesture to one UI reload.
+        library.updateSpeaker(meeting: meeting.id, speakerID: id, refresh: false) { profile in
             profile.displayName = trimmed
         }
-        // Fold this speaker's voice into a global identity (creates one if
-        // none matches). No-op when embeddings aren't cached yet — the link
-        // attempt is replayed on the next manual edit.
         library.linkOrCreateIdentity(speakerID: id, meeting: meeting.id)
         editingID = nil
     }
@@ -853,7 +852,8 @@ private struct SpeakersPanel: View {
     /// person rather than a name string.
     private func apply(attendeeID: String, to id: SpeakerID) {
         guard let attendee = lookupAttendee(id: attendeeID) else { return }
-        library.updateSpeaker(meeting: meeting.id, speakerID: id) { profile in
+        // refresh: false — linkOrCreateIdentity handles the final refresh
+        library.updateSpeaker(meeting: meeting.id, speakerID: id, refresh: false) { profile in
             profile.displayName = attendee.displayName
             profile.attendeeId = attendee.id
             profile.email = attendee.email
