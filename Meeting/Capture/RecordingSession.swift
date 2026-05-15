@@ -65,7 +65,7 @@ final class RecordingSession: ObservableObject {
         return false
     }
 
-    func start(window: SCWindow, event: CalendarEvent? = nil) async {
+    func start(source: CaptureSource, event: CalendarEvent? = nil) async {
         guard state == .idle else {
             NSLog("[Meeting/Session] start: bail — state is %@, expected .idle",
                   String(describing: state))
@@ -98,21 +98,21 @@ final class RecordingSession: ObservableObject {
         let micURL = folder.appendingPathComponent("mic.m4a")
         let outputURL = folder.appendingPathComponent("output.m4a")
 
-        guard let app = window.owningApplication else {
-            failStart("หน้าต่างที่เลือกไม่มี application owner")
-            return
-        }
-        let targetPID = app.processID
-        let bundleID = app.bundleIdentifier
-        let appName = app.applicationName
-        NSLog("[Meeting/Session] start: target app name=%@ bundleID=%@ pid=%d title=%@",
-              appName, bundleID, targetPID, window.title ?? "(none)")
+        // Per-source identity. Window mode has rich integrations
+        // (mic gate, Meet scraper) that depend on bundle ID / PID;
+        // display mode skips them.
+        let sourcePID: pid_t? = source.pid
+        let sourceBundleID: String? = source.bundleID
+        NSLog("[Meeting/Session] start: source=%@ pid=%@ bundle=%@",
+              String(describing: source),
+              sourcePID.map(String.init) ?? "(none)",
+              sourceBundleID ?? "(none)")
 
         // Step 1: screen capture.
         NSLog("[Meeting/Session] start: step 1 — SCStream.startCapture …")
         let coord = ScreenCaptureCoordinator()
         do {
-            try await coord.start(source: .window(window), videoURL: videoURL)
+            try await coord.start(source: source, videoURL: videoURL)
             guard state == .starting else {
                 try? await coord.stop()
                 NSLog("[Meeting/Session] start: cancelled during step 1 — rolled back")
@@ -158,7 +158,8 @@ final class RecordingSession: ObservableObject {
             return
         }
 
-        // Step 3: per-process audio tap. CoreAudio HAL setup
+        // Step 3: audio tap. Per-process for window sources; system-wide
+        // for display sources. CoreAudio HAL setup
         // (AudioHardwareCreateProcessTap / CreateAggregateDevice /
         // AudioDeviceStart) is sync and the slowest leg — off-main for
         // the same reason as step 2.
@@ -167,11 +168,15 @@ final class RecordingSession: ObservableObject {
         do {
             let outputURLLocal = outputURL
             let outputRMSLocal = outputRMS
-            let bundleIDLocal = bundleID
-            let pidLocal = targetPID
+            let tapTarget: ProcessAudioTap.TapTarget
+            if let pid = sourcePID, let bundle = sourceBundleID {
+                tapTarget = .process(pid: pid, bundleID: bundle)
+            } else {
+                tapTarget = .system
+            }
             try await Task.detached(priority: .userInitiated) {
                 try tap.start(
-                    target: .process(pid: pidLocal, bundleID: bundleIDLocal),
+                    target: tapTarget,
                     url: outputURLLocal,
                     rmsBuffer: outputRMSLocal
                 )
@@ -195,16 +200,18 @@ final class RecordingSession: ObservableObject {
             return
         }
 
-        currentSourceTitle = window.title
-        currentSourceApp = appName
+        currentSourceTitle = source.title
+        currentSourceApp = source.app
         let recordingStart = Date()
         state = .recording(folder: folder, started: recordingStart)
 
         // Step 4: mic gate (optional). Watches the meeting app's UI to know
         // when the user has muted themselves in Meet, so the transcription
         // pipeline can later silence Whisper's input over those intervals.
+        // Skipped for display sources (no bundleID to bind a gate to).
         // Failure here is non-fatal — recording proceeds without gating.
-        if let gate = MicGate.create(forBundleID: bundleID, pid: targetPID) {
+        if let bundle = sourceBundleID, let pid = sourcePID,
+           let gate = MicGate.create(forBundleID: bundle, pid: pid) {
             gate.start(sessionStart: recordingStart)
             self.micGate = gate
             // Mirror the gate's detection state into our own @Published so
@@ -217,17 +224,19 @@ final class RecordingSession: ObservableObject {
                 self?.micGateState = state
             }
             NSLog("[Meeting/Session] start: step 4 done — MicGate active for bundle=%@ source=%@",
-                  bundleID, gate.sourceLabel)
+                  bundle, gate.sourceLabel)
         } else {
-            NSLog("[Meeting/Session] start: step 4 skipped — no MicGate for bundle=%@ (or accessibility not granted)", bundleID)
+            NSLog("[Meeting/Session] start: step 4 skipped — no bundleID or no MicGate for source")
         }
 
         // Step 5: Meet participants AX scrape (Chrome only). Periodic
         // capture of video tile names so the Library detail can show who
         // actually joined — fills the gap when the calendar invitee list
         // contains only a group email (which EventKit can't expand).
-        if bundleID == "com.google.Chrome", AXIsProcessTrusted() {
-            let collector = MeetParticipantsCollector(pid: targetPID)
+        // Skipped for display sources (no PID to attach AX to).
+        if sourceBundleID == "com.google.Chrome",
+           let pid = sourcePID, AXIsProcessTrusted() {
+            let collector = MeetParticipantsCollector(pid: pid)
             collector.start()
             self.meetParticipants = collector
             NSLog("[Meeting/Session] start: step 5 done — MeetParticipantsCollector active")
@@ -250,6 +259,12 @@ final class RecordingSession: ObservableObject {
 
         cancelStartWatchdog()
         NSLog("[Meeting/Session] start: ALL READY — state=recording")
+    }
+
+    /// Temporary compat shim — removed in Task 7 when the call site
+    /// migrates to start(source:event:).
+    func start(window: SCWindow, event: CalendarEvent? = nil) async {
+        await start(source: .window(window), event: event)
     }
 
     /// User-facing escape hatch from the .starting state. Called by the
