@@ -256,18 +256,21 @@ actor ClaudeCLIProvider: LLMProvider {
     /// Image filenames are emitted as relative paths
     /// (`clipboard/<filename>.png`) and the working directory of the
     /// `claude` subprocess is set to the meeting folder, so Claude's
-    /// Read tool can fetch the image bytes if visual context helps.
+    /// Read tool can fetch the image bytes — the prompt rule below makes
+    /// reading every captured image mandatory.
     ///
-    /// URLs that look like Jira cards are tagged `[JIRA card]` so the
-    /// prompt rules can target them — the model is instructed to fetch
-    /// each one (Atlassian MCP > WebFetch) and emit an entry in the
-    /// `references` JSON field. The renderer uses that to upgrade the
-    /// References section's bare URL into "KEY-123 — Title · Status".
+    /// URLs that look like Jira cards or Confluence pages are tagged
+    /// `[JIRA card]` / `[Confluence page]` so the prompt rules can target
+    /// them — the model is instructed to fetch every one (Atlassian MCP >
+    /// WebFetch) and emit an entry in the `references` JSON field. The
+    /// renderer uses that to upgrade the References section's bare URL
+    /// into "KEY-123 — Title · Status" or the Confluence page title.
     private static func buildContextSection(context: MeetingLLMContext) -> String {
         guard !context.contextItems.isEmpty else { return "" }
         var lines: [String] = ["Captured during the meeting (clipboard + visited links):"]
         var hasImages = false
         var hasJira = false
+        var hasConfluence = false
         for item in context.contextItems {
             let stamp = formatTimestamp(item.offset)
             switch item.kind {
@@ -281,9 +284,12 @@ actor ClaudeCLIProvider: LLMProvider {
             case .url:
                 let urlString = item.text ?? ""
                 let isJira = isJiraURL(urlString)
+                let isConfluence = isConfluenceURL(urlString)
                 if isJira { hasJira = true }
+                if isConfluence { hasConfluence = true }
                 let label: String = {
                     if isJira { return "[JIRA card]" }
+                    if isConfluence { return "[Confluence page]" }
                     if item.source == .browser {
                         if let title = item.pageTitle, !title.isEmpty {
                             return "visited \"\(title)\""
@@ -304,11 +310,15 @@ actor ClaudeCLIProvider: LLMProvider {
         }
         if hasImages {
             lines.append("")
-            lines.append("Image files are at the listed relative paths from your working directory; you need to Read them if visual context would meaningfully change the summary.")
+            lines.append("Image files are at the listed relative paths from your working directory. You MUST Read every one of them before writing the summary so visual context informs the result.")
         }
         if hasJira {
             lines.append("")
-            lines.append("For each item tagged [JIRA card], fetch the issue using your Atlassian MCP tool (preferred) or WebFetch as a fallback, then emit one object in `references` with `url` (the original URL verbatim), `label` (e.g. \"MOBILE-123 — Reword onboarding text\"), and `note` (one short line, e.g. \"In Progress · assignee: Pim · due Mar 15\"). If a fetch fails, skip that entry rather than guessing.")
+            lines.append("For every item tagged [JIRA card] you MUST fetch the issue using your Atlassian MCP tool (preferred) or WebFetch as a fallback — do not skip any — then emit one object in `references` with `url` (the original URL verbatim), `label` (e.g. \"MOBILE-123 — Reword onboarding text\"), and `note` (one short line, e.g. \"In Progress · assignee: Pim · due Mar 15\"). If a fetch genuinely fails after retrying, skip that entry rather than guessing.")
+        }
+        if hasConfluence {
+            lines.append("")
+            lines.append("For every item tagged [Confluence page] you MUST fetch the page content using your Atlassian MCP tool (preferred) or WebFetch as a fallback — do not skip any — then emit one object in `references` with `url` (the original URL verbatim), `label` (the page title), and `note` (one short line summarizing what the page is, e.g. \"Sprint Retro 2026-10 board\"). Use the page body to ground anything in the summary that refers to it. If a fetch genuinely fails after retrying, skip that entry rather than guessing.")
         }
         return "\n\n" + lines.joined(separator: "\n")
     }
@@ -326,6 +336,17 @@ actor ClaudeCLIProvider: LLMProvider {
         let key = path.dropFirst("/browse/".count)
         let pattern = #"^[A-Z][A-Z0-9_]+-\d+$"#
         return key.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    /// Match Atlassian-Cloud Confluence page URLs: anything under
+    /// `https://<tenant>.atlassian.net/wiki/...`. Covers both the modern
+    /// `/wiki/spaces/<KEY>/pages/<id>/<slug>` shape and the older
+    /// `/wiki/display/...` paths, plus shortlinks like `/wiki/x/<id>`.
+    private static func isConfluenceURL(_ s: String) -> Bool {
+        guard let url = URL(string: s),
+              let host = url.host?.lowercased(),
+              host.hasSuffix(".atlassian.net") else { return false }
+        return url.path.hasPrefix("/wiki/")
     }
 
     /// Speakers section — pairs each transcript label with the
