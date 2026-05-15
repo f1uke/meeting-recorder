@@ -23,6 +23,12 @@ final class MeetingsLibrary: ObservableObject {
     private var overrides: LibraryOverrides
     private var fileSource: DispatchSourceFileSystemObject?
 
+    /// Monotonic counter bumped on every `rescan()` call. The detached
+    /// disk-walking task captures the value at start and compares against
+    /// the latest on completion — stale results from a superseded rescan
+    /// are dropped instead of overwriting fresher state.
+    private var rescanSeq: UInt64 = 0
+
     // Cross-meeting speaker identity — optional so existing tests don't need
     // to pass a store. When nil, `loadRecord` skips suggestion computation.
     private let identityStore: IdentityStore?
@@ -82,35 +88,51 @@ final class MeetingsLibrary: ObservableObject {
     /// and from `AppState.stopAndTranscribe()` once transcription writes
     /// the per-meeting JSONs. For single-meeting edits prefer
     /// `refreshMeeting(folder:)` — full rescan reads every meeting folder.
+    ///
+    /// Disk I/O + JSON decoding for all folders runs in a detached
+    /// background task; only the final `@Published` mutation hops back to
+    /// MainActor. Concurrent rescans are coalesced via `rescanSeq` so the
+    /// last-issued scan wins.
     func rescan() {
-        let folders = (try? FileManager.default.contentsOfDirectory(
-            at: meetingsRoot,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
+        rescanSeq &+= 1
+        let seq = rescanSeq
+        let root = meetingsRoot
         let identitiesSnapshot = identityStore?.identities ?? []
         let queue = embeddingQueue
         let config = matchingConfig
-        let records = folders.compactMap { folder -> MeetingRecord? in
-            var isDir: ObjCBool = false
-            let path = folder.path(percentEncoded: false)
-            FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
-            guard isDir.boolValue else { return nil }
-            return Self.loadRecord(
-                folder: folder,
-                override: overrides.meetings[folder.lastPathComponent],
-                identities: identitiesSnapshot,
-                embeddingQueue: queue,
-                matchingConfig: config
-            )
-        }
+        let overridesSnapshot = overrides.meetings
 
-        meetings = records.sorted { $0.recordedAt > $1.recordedAt }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let folders = (try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
 
-        // Drop selection if it points at a folder that no longer exists.
-        if let sel = selection, !meetings.contains(where: { $0.id == sel }) {
-            selection = nil
+            let records = folders.compactMap { folder -> MeetingRecord? in
+                var isDir: ObjCBool = false
+                let path = folder.path(percentEncoded: false)
+                FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+                guard isDir.boolValue else { return nil }
+                return MeetingsLibrary.loadRecord(
+                    folder: folder,
+                    override: overridesSnapshot[folder.lastPathComponent],
+                    identities: identitiesSnapshot,
+                    embeddingQueue: queue,
+                    matchingConfig: config
+                )
+            }
+
+            let sorted = records.sorted { $0.recordedAt > $1.recordedAt }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                // Drop stale results if a fresher rescan has been queued.
+                guard seq == self.rescanSeq else { return }
+                self.meetings = sorted
+                if let sel = self.selection, !self.meetings.contains(where: { $0.id == sel }) {
+                    self.selection = nil
+                }
+            }
         }
     }
 
@@ -434,7 +456,7 @@ final class MeetingsLibrary: ObservableObject {
 
     // MARK: - Loaders
 
-    private static func loadRecord(
+    private nonisolated static func loadRecord(
         folder: URL,
         override: MeetingOverride?,
         identities: [Identity] = [],
@@ -565,7 +587,7 @@ final class MeetingsLibrary: ObservableObject {
         )
     }
 
-    private static func folderTitle(folderName: String, date: Date) -> String {
+    private nonisolated static func folderTitle(folderName: String, date: Date) -> String {
         guard date != .distantPast else { return folderName }
         let f = DateFormatter()
         f.locale = Locale.current
