@@ -33,6 +33,12 @@ actor ClaudeCLIProvider: LLMProvider {
             input: prompt,
             workingDirectory: context.meetingFolder
         )
+        // Persist the full Claude CLI envelope alongside summary.json
+        // so we have an audit trail of cost, token usage, tool calls,
+        // and session_id (for /resume) per run. Best-effort — if disk
+        // write fails we don't fail the whole summary, since the data
+        // we actually need (`result`) is already in memory.
+        Self.writeRunAudit(raw: raw, to: context.meetingFolder)
         let inner = try Self.parseClaudeOutput(raw)
         let llmJSON = Self.stripJSONFences(inner)
 
@@ -499,6 +505,29 @@ actor ClaudeCLIProvider: LLMProvider {
                 continuation.resume(returning: outStr)
             }
         }
+    }
+
+    /// Write the full Claude CLI envelope to `<folder>/summary_run.json`
+    /// so the run is auditable after the fact: cost, token usage (incl.
+    /// cache hits), `num_turns` (tells us whether tool calls happened),
+    /// `usage.server_tool_use` counters, and `session_id` (which lets
+    /// the user replay the conversation via `claude --resume <id>`).
+    /// Pretty-prints when the envelope parses; otherwise falls back to
+    /// the raw stdout verbatim so a malformed envelope is still
+    /// recoverable. All errors are swallowed — this is observability,
+    /// not correctness.
+    private static func writeRunAudit(raw: String, to folder: URL) {
+        let url = folder.appendingPathComponent("summary_run.json")
+        if let data = raw.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data),
+           let pretty = try? JSONSerialization.data(
+               withJSONObject: obj,
+               options: [.prettyPrinted, .sortedKeys]
+           ) {
+            try? pretty.write(to: url, options: [.atomic])
+            return
+        }
+        try? raw.write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// Claude Code's `--output-format json` returns an envelope like
