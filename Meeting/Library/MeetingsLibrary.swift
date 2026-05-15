@@ -156,7 +156,9 @@ final class MeetingsLibrary: ObservableObject {
             NSLog("[Meeting/Library] library.json write failed: %@",
                   String(describing: error))
         }
-        rescan()
+        if let meeting = meetings.first(where: { $0.id == id }) {
+            refreshMeeting(folder: meeting.folder)
+        }
     }
 
     /// Replace one speaker's profile in `<meeting>/speakers.json` and
@@ -231,14 +233,14 @@ final class MeetingsLibrary: ObservableObject {
             NSLog("[Meeting/Library] context.json rewrite failed: %@",
                   String(describing: error))
         }
-        rescan()
+        refreshMeeting(folder: meeting.folder)
     }
 
     /// Move a meeting's folder to the Trash and drop its override entry.
     /// Falls back to a hard delete if Trash isn't available (e.g. on a
-    /// volume that doesn't support it). The watcher will fire a rescan
-    /// shortly after, but we rescan synchronously so the UI updates
-    /// immediately.
+    /// volume that doesn't support it). The folder-rename watcher will
+    /// fire shortly after, but we mutate the in-memory array synchronously
+    /// so the UI updates immediately.
     func delete(meeting id: MeetingRecord.ID) {
         guard let meeting = meetings.first(where: { $0.id == id }) else { return }
         do {
@@ -260,7 +262,8 @@ final class MeetingsLibrary: ObservableObject {
                       String(describing: error))
             }
         }
-        rescan()
+        meetings.removeAll { $0.id == id }
+        if selection == id { selection = nil }
     }
 
     // MARK: - Identity matching
