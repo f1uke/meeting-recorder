@@ -104,6 +104,25 @@ final class ClipboardWatcher {
         if let text = pb.string(forType: .string) {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
+            // Some sources (chat apps, terminals, "Copy URL" in apps that
+            // don't stamp `public.url`) put the URL only on the string
+            // flavor of the pasteboard, so `readObjects(forClasses:[NSURL])`
+            // above misses it and we'd otherwise classify it as plain
+            // text. If the trimmed content is exactly one well-formed
+            // http(s) URL, promote it to .url so the summary prompt's
+            // Jira / Confluence fetch rules apply.
+            if Self.isStandaloneURL(trimmed) {
+                Task { [collector] in
+                    await collector.append(
+                        kind: .url,
+                        source: .clipboard,
+                        text: trimmed,
+                        at: now
+                    )
+                }
+                NSLog("[Meeting/Clipboard] captured url (from text flavor): %@", trimmed)
+                return
+            }
             Task { [collector] in
                 await collector.append(
                     kind: .text,
@@ -114,6 +133,20 @@ final class ClipboardWatcher {
             }
             NSLog("[Meeting/Clipboard] captured text: %d chars", text.count)
         }
+    }
+
+    /// True when `s` is exactly one well-formed http(s) URL with a host
+    /// — no surrounding text, no inner whitespace. We use the precise
+    /// shape because `URL(string:)` is permissive (e.g. it accepts
+    /// "hello world" as a relative path), and we'd rather under-promote
+    /// than mis-promote a chat sentence into a URL chip.
+    private static func isStandaloneURL(_ s: String) -> Bool {
+        guard !s.contains(where: { $0.isWhitespace || $0.isNewline }) else { return false }
+        let lower = s.lowercased()
+        guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return false }
+        guard let url = URL(string: s),
+              let host = url.host, !host.isEmpty else { return false }
+        return true
     }
 
     private func pngData(from image: NSImage) -> Data? {

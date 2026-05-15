@@ -271,33 +271,44 @@ actor ClaudeCLIProvider: LLMProvider {
         var hasImages = false
         var hasJira = false
         var hasConfluence = false
+        var hasEmbeddedLinks = false
+        // Dedupe URLs across items — a Confluence link copied + visited
+        // shouldn't produce two separate fetch directives, and the same
+        // URL embedded twice in chat-paste bodies shouldn't either.
+        var seenURLs: Set<String> = []
         for item in context.contextItems {
             let stamp = formatTimestamp(item.offset)
             switch item.kind {
             case .text:
-                let snippet = (item.text ?? "")
-                    .replacingOccurrences(of: "\n", with: " ")
+                let body = item.text ?? ""
+                let snippet = body.replacingOccurrences(of: "\n", with: " ")
                 let trimmed = snippet.count > 240
                     ? String(snippet.prefix(240)) + "…"
                     : snippet
                 lines.append("- [\(stamp)] copied text: \"\(trimmed)\"")
+                // Surface every URL embedded inside the body — Figma
+                // links inside a chat paste, Jira tickets in a Slack
+                // quote, etc. Without this they'd be invisible to the
+                // prompt rules and the model wouldn't know to act on
+                // them. Same dedupe / categorization as standalone URLs.
+                for embedded in extractURLs(in: body) {
+                    if !seenURLs.insert(embedded).inserted { continue }
+                    let label = labelForURL(embedded,
+                                            updating: &hasJira,
+                                            confluence: &hasConfluence,
+                                            embedded: &hasEmbeddedLinks,
+                                            isEmbedded: true)
+                    lines.append("- [\(stamp)] \(label): \(embedded)")
+                }
             case .url:
                 let urlString = item.text ?? ""
-                let isJira = isJiraURL(urlString)
-                let isConfluence = isConfluenceURL(urlString)
-                if isJira { hasJira = true }
-                if isConfluence { hasConfluence = true }
-                let label: String = {
-                    if isJira { return "[JIRA card]" }
-                    if isConfluence { return "[Confluence page]" }
-                    if item.source == .browser {
-                        if let title = item.pageTitle, !title.isEmpty {
-                            return "visited \"\(title)\""
-                        }
-                        return "visited"
-                    }
-                    return "copied link"
-                }()
+                if !seenURLs.insert(urlString).inserted { continue }
+                let label = labelForURL(urlString,
+                                        updating: &hasJira,
+                                        confluence: &hasConfluence,
+                                        embedded: &hasEmbeddedLinks,
+                                        isEmbedded: false,
+                                        browserTitle: item.source == .browser ? item.pageTitle : nil)
                 lines.append("- [\(stamp)] \(label): \(urlString)")
             case .image:
                 hasImages = true
@@ -320,7 +331,57 @@ actor ClaudeCLIProvider: LLMProvider {
             lines.append("")
             lines.append("For every item tagged [Confluence page] you MUST fetch the page content using your Atlassian MCP tool (preferred) or WebFetch as a fallback — do not skip any — then emit one object in `references` with `url` (the original URL verbatim), `label` (the page title), and `note` (one short line summarizing what the page is, e.g. \"Sprint Retro 2026-10 board\"). Use the page body to ground anything in the summary that refers to it. If a fetch genuinely fails after retrying, skip that entry rather than guessing.")
         }
+        if hasEmbeddedLinks {
+            lines.append("")
+            lines.append("Items tagged [embedded link] are URLs the user pasted inside a larger text block (chat quotes, message bodies). You MUST include every distinct embedded link in `references` with `url` (verbatim), `label` (a short human title — for Figma use \"Figma — <file name>\", for GitHub use \"<repo> · <kind>\", otherwise the host + path tail), and `note` (one short line describing what the link is for, derived from the surrounding text body and the rest of the meeting context). Don't fetch them unless you already have permission and a fetch tool that fits — including the URL with a labeled, grounded note is enough.")
+        }
         return "\n\n" + lines.joined(separator: "\n")
+    }
+
+    /// Build the bullet label for a captured URL, updating the section's
+    /// "has..." flags so the right prompt rules get appended at the end.
+    /// Shared between the `.url` case and the URL-inside-text scan.
+    private static func labelForURL(
+        _ urlString: String,
+        updating hasJira: inout Bool,
+        confluence hasConfluence: inout Bool,
+        embedded hasEmbedded: inout Bool,
+        isEmbedded: Bool,
+        browserTitle: String? = nil
+    ) -> String {
+        if isJiraURL(urlString) { hasJira = true; return "[JIRA card]" }
+        if isConfluenceURL(urlString) { hasConfluence = true; return "[Confluence page]" }
+        if isEmbedded { hasEmbedded = true; return "[embedded link]" }
+        if let title = browserTitle, !title.isEmpty {
+            return "visited \"\(title)\""
+        }
+        if browserTitle != nil { return "visited" }
+        return "copied link"
+    }
+
+    /// Find every http(s) URL inside a free-form text body. Uses
+    /// `NSDataDetector` so we catch URLs separated by whitespace or
+    /// punctuation, and trim trailing punctuation the detector sometimes
+    /// includes (`https://foo.com,` → `https://foo.com`). Only http and
+    /// https schemes — we don't want mailto: / file: / app-private
+    /// schemes leaking into references.
+    private static func extractURLs(in body: String) -> [String] {
+        guard !body.isEmpty,
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        else { return [] }
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        var out: [String] = []
+        detector.enumerateMatches(in: body, options: [], range: range) { match, _, _ in
+            guard let url = match?.url else { return }
+            let s = url.absoluteString
+            let lower = s.lowercased()
+            guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return }
+            // Strip trailing punctuation that the detector greedily
+            // includes when a URL sits at the end of a sentence.
+            let trimmed = s.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:)\"'"))
+            out.append(trimmed.isEmpty ? s : trimmed)
+        }
+        return out
     }
 
     /// Match Atlassian-Cloud Jira card URLs: `https://<tenant>.atlassian.net/browse/PROJ-123`
