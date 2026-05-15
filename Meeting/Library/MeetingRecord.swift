@@ -68,6 +68,12 @@ struct MeetingRecord: Identifiable, Equatable, Hashable, Sendable {
     /// before the next AI summary run picks them up.
     let contextItems: [ContextItem]
 
+    /// Cross-meeting identity suggestions computed at Library scan time —
+    /// one row per (un-mapped speaker, candidate global identity) above
+    /// the matcher threshold, with greedy mutual exclusion applied.
+    /// In-memory only; recomputed on each rescan.
+    var identitySuggestions: [IdentitySuggestion] = []
+
     var id: String { folder.lastPathComponent }
 }
 
