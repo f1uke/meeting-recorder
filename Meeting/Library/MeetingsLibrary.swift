@@ -177,7 +177,14 @@ final class MeetingsLibrary: ObservableObject {
         transform: (inout SpeakerProfile) -> Void
     ) {
         guard let meeting = meetings.first(where: { $0.id == id }) else { return }
-        var profiles = meeting.speakerProfiles
+        // Source-of-truth is disk, not in-memory — when callers chain edits
+        // (updateSpeaker(refresh: false) → linkOrCreateIdentity → updateSpeaker)
+        // the in-memory `meetings` array isn't refreshed between writes, so
+        // reading from it would clobber the previous edit. Fall back to the
+        // in-memory snapshot only when speakers.json doesn't exist yet
+        // (fresh meeting that's never been touched).
+        var profiles = (try? SpeakerMapFile.read(from: meeting.folder).speakers)
+            ?? meeting.speakerProfiles
         if let idx = profiles.firstIndex(where: { $0.id == speakerID }) {
             transform(&profiles[idx])
         } else {
