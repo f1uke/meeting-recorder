@@ -151,34 +151,75 @@ enum MeetingNoteRenderer {
     }
 
     private static func renderReferences(meeting: MeetingRecord, summary: Summary) -> String {
+        let refs = summary.references ?? []
         let urlItems = meeting.contextItems.filter { $0.kind == .url }
-        // Index enriched refs by URL so we can swap a bare-URL line for
-        // the LLM-resolved label/note (e.g. "MOBILE-123 — Reword
-        // onboarding · In Progress") on the same row.
-        let enrichedByURL = Dictionary(
-            (summary.references ?? []).map { ($0.url, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
         var lines: [String] = ["## References"]
-        if urlItems.isEmpty {
+
+        if !refs.isEmpty {
+            // LLM-curated references are the source of truth — they
+            // include URLs lifted from inside text-kind clipboard
+            // bodies (chat pastes with embedded Figma / Jira links)
+            // that wouldn't survive a `kind == .url` filter. For each
+            // ref, attach the earliest captured timestamp by searching
+            // both url-kind items (exact match) and text-kind bodies
+            // (substring) so the user can still scrub to where it came
+            // up in the meeting.
+            let alreadyRendered = Set(refs.map(\.url))
+            for ref in refs {
+                let stamp = firstTimestamp(for: ref.url, in: meeting.contextItems)
+                let note = ref.note?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                let suffix = note.map { " — \($0)" } ?? ""
+                let stampSuffix = stamp.map { " · `\($0)`" } ?? ""
+                lines.append("- [\(escapeInline(ref.label))](\(ref.url))\(suffix)\(stampSuffix)")
+            }
+            // Any url-kind items the LLM didn't pull into references
+            // (e.g. it deemed them noise) still get a bare bullet so
+            // the user sees nothing was silently dropped.
+            for item in urlItems {
+                let urlString = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !urlString.isEmpty, !alreadyRendered.contains(urlString) else { continue }
+                let stamp = formatTimestamp(item.offset)
+                let label = item.pageTitle?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? urlString
+                lines.append("- [\(escapeInline(label))](\(urlString)) · `\(stamp)`")
+            }
+        } else if urlItems.isEmpty {
             lines.append("_None_")
         } else {
             for item in urlItems {
                 let urlString = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !urlString.isEmpty else { continue }
                 let stamp = formatTimestamp(item.offset)
-                if let ref = enrichedByURL[urlString] {
-                    let note = ref.note?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                    let suffix = note.map { " — \($0)" } ?? ""
-                    lines.append("- [\(escapeInline(ref.label))](\(urlString))\(suffix) · `\(stamp)`")
-                } else {
-                    let label = item.pageTitle?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                        ?? urlString
-                    lines.append("- [\(escapeInline(label))](\(urlString)) · `\(stamp)`")
-                }
+                let label = item.pageTitle?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? urlString
+                lines.append("- [\(escapeInline(label))](\(urlString)) · `\(stamp)`")
             }
         }
         return lines.joined(separator: "\n") + "\n\n"
+    }
+
+    /// Earliest captured offset where `url` shows up — either as the
+    /// entire payload of a `.url` item, or embedded in the body of a
+    /// `.text` item. Returns nil if the URL doesn't appear in the
+    /// meeting's context items (shouldn't happen with the current
+    /// prompt rules, but the LLM is free to invent a reference and we
+    /// won't make up a timestamp for one).
+    private static func firstTimestamp(for url: String, in items: [ContextItem]) -> String? {
+        let needle = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        let match = items
+            .filter { item in
+                switch item.kind {
+                case .url:
+                    return (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == needle
+                case .text:
+                    return (item.text ?? "").contains(needle)
+                case .image:
+                    return false
+                }
+            }
+            .min(by: { $0.offset < $1.offset })
+        return match.map { formatTimestamp($0.offset) }
     }
 
     private static func renderCaptured(meeting: MeetingRecord) -> String {

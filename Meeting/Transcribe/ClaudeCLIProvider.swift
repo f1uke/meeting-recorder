@@ -362,22 +362,30 @@ actor ClaudeCLIProvider: LLMProvider {
     /// Find every http(s) URL inside a free-form text body. Uses
     /// `NSDataDetector` so we catch URLs separated by whitespace or
     /// punctuation, and trim trailing punctuation the detector sometimes
-    /// includes (`https://foo.com,` → `https://foo.com`). Only http and
-    /// https schemes — we don't want mailto: / file: / app-private
-    /// schemes leaking into references.
+    /// includes (`https://foo.com,` → `https://foo.com`). Critically we
+    /// inspect the *original substring* at the match range, not
+    /// `match.url.absoluteString` — the detector synthesizes `http://`
+    /// for bare-host shapes like `badge_table.id` (the .id TLD belongs
+    /// to Indonesia), which would otherwise pollute the References
+    /// section with column names and identifier-shaped tokens. We only
+    /// accept matches that literally started with http:// or https://.
     private static func extractURLs(in body: String) -> [String] {
         guard !body.isEmpty,
               let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         else { return [] }
-        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        let nsRange = NSRange(body.startIndex..<body.endIndex, in: body)
         var out: [String] = []
-        detector.enumerateMatches(in: body, options: [], range: range) { match, _, _ in
-            guard let url = match?.url else { return }
+        detector.enumerateMatches(in: body, options: [], range: nsRange) { match, _, _ in
+            guard let match,
+                  let matched = Range(match.range, in: body),
+                  let url = match.url else { return }
+            let original = String(body[matched])
+            let lowerOrig = original.lowercased()
+            guard lowerOrig.hasPrefix("http://") || lowerOrig.hasPrefix("https://") else { return }
+            // Use the canonicalized URL the detector parsed, but trim
+            // trailing punctuation it greedily includes at the end of a
+            // sentence.
             let s = url.absoluteString
-            let lower = s.lowercased()
-            guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return }
-            // Strip trailing punctuation that the detector greedily
-            // includes when a URL sits at the end of a sentence.
             let trimmed = s.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:)\"'"))
             out.append(trimmed.isEmpty ? s : trimmed)
         }
