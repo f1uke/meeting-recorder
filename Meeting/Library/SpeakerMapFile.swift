@@ -28,19 +28,25 @@ struct SpeakerProfile: Codable, Hashable, Sendable {
     /// "unknown". Captured for LLM prompt context — knowing the chair
     /// changes how Claude weighs "I'll do X" vs "you should do X".
     var role: String?
+    /// Cross-meeting identity link — UUID of an `Identity` in the global
+    /// `identities.json`. Set when the user confirms a suggestion or
+    /// manually names a speaker; `nil` for un-mapped diarized speakers.
+    var identityID: String?
 
     init(
         id: SpeakerID,
         displayName: String,
         attendeeId: String? = nil,
         email: String? = nil,
-        role: String? = nil
+        role: String? = nil,
+        identityID: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.attendeeId = attendeeId
         self.email = email
         self.role = role
+        self.identityID = identityID
     }
 
     /// Drop down to the lightweight `Speaker` value for places that
