@@ -224,8 +224,18 @@ enum MeetingNoteRenderer {
 
     private static func renderCaptured(meeting: MeetingRecord) -> String {
         let imageItems = meeting.contextItems.filter { $0.kind == .image }
+        // Text items that aren't already covered by References. A text
+        // item whose entire payload is a single URL is now reclassified
+        // as kind=.url at capture time, but legacy meetings recorded
+        // before that fix kept them as .text — drop those here so they
+        // don't duplicate the References bullet.
+        let textItems = meeting.contextItems.filter { item in
+            guard item.kind == .text else { return false }
+            let trimmed = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return !Self.isStandaloneURL(trimmed)
+        }
         var lines: [String] = ["## Captured Materials"]
-        if imageItems.isEmpty {
+        if imageItems.isEmpty && textItems.isEmpty {
             lines.append("_None_")
         } else {
             for item in imageItems {
@@ -236,8 +246,64 @@ enum MeetingNoteRenderer {
                     lines.append("- 📎 _image_ · `\(stamp)`")
                 }
             }
+            for item in textItems {
+                let stamp = formatTimestamp(item.offset)
+                let body = item.text ?? ""
+                if Self.looksLikeMermaid(body) {
+                    // Drop the source into a ```mermaid fence so Obsidian's
+                    // Mermaid renderer turns it into the diagram inline.
+                    // Far more useful than 30 lines of `sequenceDiagram`
+                    // text the reader has to mentally compile.
+                    lines.append("- 🧜 Mermaid diagram · `\(stamp)`")
+                    lines.append("```mermaid")
+                    lines.append(body.trimmingCharacters(in: .whitespacesAndNewlines))
+                    lines.append("```")
+                } else {
+                    // Anything else: a short quoted preview. Truncate at
+                    // 400 chars so a chat paste or a giant code dump
+                    // doesn't bloat the note — the reader can open the
+                    // meeting folder if they want the full content.
+                    lines.append("- 📋 Clipboard text · `\(stamp)`")
+                    let preview: String = {
+                        let collapsed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard collapsed.count > 400 else { return collapsed }
+                        return String(collapsed.prefix(400)) + "…"
+                    }()
+                    for line in preview.split(separator: "\n", omittingEmptySubsequences: false) {
+                        lines.append("  > \(line)")
+                    }
+                }
+            }
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// True when the trimmed text is exactly one well-formed http(s) URL
+    /// with a host — mirrors ClipboardWatcher.isStandaloneURL so the
+    /// "skip already-in-References URLs" filter matches what would have
+    /// been promoted to .url at capture time on the new build.
+    private static func isStandaloneURL(_ s: String) -> Bool {
+        guard !s.isEmpty,
+              !s.contains(where: { $0.isWhitespace || $0.isNewline }) else { return false }
+        let lower = s.lowercased()
+        guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return false }
+        guard let url = URL(string: s), let host = url.host, !host.isEmpty else { return false }
+        return true
+    }
+
+    /// Detect Mermaid source by its leading directive. Covers the
+    /// diagram types most likely to show up in a meeting: sequence,
+    /// flowchart/graph, class, state, ER, gantt, pie, journey, gitgraph.
+    /// Case-insensitive because Mermaid accepts mixed case, but the
+    /// directive must be the first token after any leading whitespace.
+    private static func looksLikeMermaid(_ s: String) -> Bool {
+        let head = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let prefixes = [
+            "sequencediagram", "graph ", "graph\t", "flowchart ", "flowchart\t",
+            "classdiagram", "statediagram", "erdiagram", "gantt", "pie ", "pie\n",
+            "journey", "gitgraph", "mindmap", "timeline"
+        ]
+        return prefixes.contains { head.hasPrefix($0) }
     }
 
     // MARK: - Field helpers
