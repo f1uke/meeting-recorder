@@ -1,5 +1,6 @@
 import XCTest
 import Combine
+import ScreenCaptureKit
 @testable import Meeting
 
 @MainActor
@@ -78,6 +79,178 @@ final class AutoRecordSchedulerTests: XCTestCase {
         host.scheduler.reevaluate()
         await Task.yield(); await Task.yield()
         XCTAssertEqual(host.scheduler.state, .idle)
+    }
+
+    func test_transitionsToCountingDownAtFireMinusCountdown() async throws {
+        let source = FakeEventSource()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = TestClock(start)
+        let captureSource = try await realDisplaySource()
+        let resolver = StubResolver(result: .source(captureSource, subtitle: "Zoom · 4 attendees"))
+        let host = SchedulerTestHost(source: source, clock: clock, resolver: resolver)
+
+        let evt = host.makeEvent(id: "e1", startsIn: 30)
+        source.upcoming = [evt]
+        await yieldRunloop()
+
+        clock.advance(to: start.addingTimeInterval(25))
+        await yieldRunloop()
+
+        if case let .countingDown(_, subtitle, remaining) = host.scheduler.state {
+            XCTAssertEqual(subtitle, "Zoom · 4 attendees")
+            XCTAssertEqual(remaining, 5)
+        } else {
+            XCTFail("Expected .countingDown, got \(host.scheduler.state)")
+        }
+    }
+
+    func test_countdownTicksDownAndFires() async throws {
+        let source = FakeEventSource()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = TestClock(start)
+        let captureSource = try await realDisplaySource()
+        let resolver = StubResolver(result: .source(captureSource, subtitle: "s"))
+        let host = SchedulerTestHost(source: source, clock: clock, resolver: resolver)
+        var fired: CalendarEvent?
+        host.scheduler.setOnStart { _, evt in fired = evt }
+
+        let evt = host.makeEvent(id: "e1", startsIn: 6)
+        source.upcoming = [evt]
+        await yieldRunloop()
+        clock.advance(to: start.addingTimeInterval(1)) // fireAt-5 = +1
+        await yieldRunloop()
+
+        for s in 2...6 {
+            clock.advance(to: start.addingTimeInterval(TimeInterval(s)))
+            await yieldRunloop()
+        }
+        XCTAssertEqual(fired?.eventIdentifier, "e1")
+        XCTAssertEqual(host.scheduler.state, .idle)
+    }
+
+    func test_userCancelMovesToIdleAndSuppresses() async throws {
+        let source = FakeEventSource()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = TestClock(start)
+        let captureSource = try await realDisplaySource()
+        let resolver = StubResolver(result: .source(captureSource, subtitle: "s"))
+        let host = SchedulerTestHost(source: source, clock: clock, resolver: resolver)
+        var skipped: (CalendarEvent, AutoRecordSuppressionReason)?
+        host.scheduler.setOnSkip { evt, reason in skipped = (evt, reason) }
+
+        let evt = host.makeEvent(id: "e1", startsIn: 6)
+        source.upcoming = [evt]
+        await yieldRunloop()
+        clock.advance(to: start.addingTimeInterval(1))
+        await yieldRunloop()
+        XCTAssertNotEqual(host.scheduler.state, .idle)
+
+        host.scheduler.cancelCurrentCountdown()
+        await yieldRunloop()
+        XCTAssertEqual(host.scheduler.state, .idle)
+        XCTAssertEqual(skipped?.0.eventIdentifier, "e1")
+        XCTAssertEqual(skipped?.1, .userCancelledThisOccurrence)
+
+        // Same event re-published → does NOT re-arm.
+        source.upcoming = [evt]
+        await yieldRunloop()
+        XCTAssertEqual(host.scheduler.state, .idle)
+    }
+
+    func test_startNowFiresImmediately() async throws {
+        let source = FakeEventSource()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = TestClock(start)
+        let captureSource = try await realDisplaySource()
+        let resolver = StubResolver(result: .source(captureSource, subtitle: "s"))
+        let host = SchedulerTestHost(source: source, clock: clock, resolver: resolver)
+        var fired = false
+        host.scheduler.setOnStart { _, _ in fired = true }
+
+        let evt = host.makeEvent(id: "e1", startsIn: 6)
+        source.upcoming = [evt]
+        await yieldRunloop()
+        clock.advance(to: start.addingTimeInterval(1))
+        await yieldRunloop()
+
+        host.scheduler.startNow()
+        await yieldRunloop()
+        XCTAssertTrue(fired)
+        XCTAssertEqual(host.scheduler.state, .idle)
+    }
+
+    func test_skipsWhenAlreadyRecording() async throws {
+        let source = FakeEventSource()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = TestClock(start)
+        let captureSource = try await realDisplaySource()
+        let resolver = StubResolver(result: .source(captureSource, subtitle: "s"))
+        let host = SchedulerTestHost(source: source, clock: clock, resolver: resolver)
+        var skipped: AutoRecordSuppressionReason?
+        host.scheduler.setOnSkip { _, reason in skipped = reason }
+        host.scheduler.setIsAlreadyRecording { true }
+
+        let evt = host.makeEvent(id: "e1", startsIn: 6)
+        source.upcoming = [evt]
+        await yieldRunloop()
+        clock.advance(to: start.addingTimeInterval(1))
+        await yieldRunloop()
+
+        XCTAssertEqual(host.scheduler.state, .idle)
+        XCTAssertEqual(skipped, .alreadyRecording)
+    }
+
+    func test_skipsWhenSourceResolverSkips() async throws {
+        let source = FakeEventSource()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = TestClock(start)
+        let resolver = StubResolver(result: .skip(reason: "no window"))
+        let host = SchedulerTestHost(source: source, clock: clock, resolver: resolver)
+        var skipped: AutoRecordSuppressionReason?
+        host.scheduler.setOnSkip { _, reason in skipped = reason }
+
+        let evt = host.makeEvent(id: "e1", startsIn: 6)
+        source.upcoming = [evt]
+        await yieldRunloop()
+        clock.advance(to: start.addingTimeInterval(1))
+        await yieldRunloop()
+
+        XCTAssertEqual(host.scheduler.state, .idle)
+        XCTAssertEqual(skipped, .sourceUnavailableAndSkipFallback)
+    }
+
+    func test_doesNotRetroactivelyTriggerAfterSleep() async throws {
+        let source = FakeEventSource()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = TestClock(start)
+        let host = SchedulerTestHost(source: source, clock: clock, resolver: StubResolver())
+        var skipped: AutoRecordSuppressionReason?
+        host.scheduler.setOnSkip { _, reason in skipped = reason }
+
+        let evt = host.makeEvent(id: "e1", startsIn: 30)
+        source.upcoming = [evt]
+        await yieldRunloop()
+        // Simulate sleep past fireAt — jump well past startDate.
+        clock.advance(to: start.addingTimeInterval(120))
+        await yieldRunloop()
+
+        XCTAssertEqual(host.scheduler.state, .idle)
+        XCTAssertEqual(skipped, .eventStartedWhileMacAsleep)
+    }
+
+    private func yieldRunloop() async {
+        for _ in 0..<8 { await Task.yield() }
+    }
+
+    /// Returns a real `CaptureSource` from `SCShareableContent`, or skips
+    /// the test if Screen Recording isn't permissioned in the runner.
+    @MainActor
+    private func realDisplaySource() async throws -> CaptureSource {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            true, onScreenWindowsOnly: true)
+        try XCTSkipIf(content.displays.isEmpty,
+                      "Test requires at least one display via SCShareableContent")
+        return .display(content.displays[0])
     }
 }
 
