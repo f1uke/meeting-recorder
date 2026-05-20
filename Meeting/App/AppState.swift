@@ -29,6 +29,8 @@ final class AppState: ObservableObject {
     /// `calendar.upcomingEvents`. Owns no UI — `AppDelegate` handles the
     /// tap action via the shared `UNUserNotificationCenterDelegate`.
     let notifier: CalendarNotifier
+    let autoRecord: AutoRecordScheduler
+    let countdownPanel: AutoRecordCountdownPanel
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
     /// True while `EmbeddingExtractionQueue` has at least one job pending or
@@ -102,6 +104,67 @@ final class AppState: ObservableObject {
         self.calendar = CalendarStore()
         self.notifier = CalendarNotifier(calendar: calendar)
 
+        let panel = AutoRecordCountdownPanel()
+        self.countdownPanel = panel
+        let prefsRef = AppPreferences.shared
+        let recordingRef = recording
+        let toastRef = toast
+
+        // Use a var-captured holder so the permission-check closure can
+        // reference `self` even though `self.autoRecord` isn't assigned yet
+        // at the point we construct the scheduler. The closure is never
+        // called during init — it's called later, on the MainActor, so the
+        // holder is always fully populated before first use.
+        var permissionCheckHolder: () -> AutoRecordSuppressionReason? = { nil }
+        self.autoRecord = AutoRecordScheduler(
+            eventSource: calendar,
+            clock: SystemClock(),
+            resolver: AutoRecordSourceResolver(),
+            prefsProvider: {
+                AutoRecordEligibilityPrefs(
+                    masterEnabled: prefsRef.autoRecordEnabled,
+                    enabledCalendarIDs: prefsRef.autoRecordEnabledCalendarIDs
+                )
+            },
+            countdownSecondsProvider: { prefsRef.autoRecordCountdownSeconds },
+            sourceFallbackProvider: { prefsRef.autoRecordSourceFallback },
+            isAlreadyRecording: { recordingRef.isRecording },
+            hasRequiredPermissions: { permissionCheckHolder() },
+            onStart: { source, event in
+                await recordingRef.start(source: source, event: event)
+            },
+            onSkip: { event, reason in
+                switch reason {
+                case .alreadyRecording:
+                    toastRef.showAutoRecordSkippedAlreadyRecording(eventTitle: event.title)
+                case .userCancelledThisOccurrence:
+                    toastRef.showAutoRecordCancelled(eventTitle: event.title)
+                case .missingScreenRecordingPermission:
+                    toastRef.showAutoRecordMissingPermission(
+                        eventTitle: event.title, permissionName: "Screen Recording")
+                case .missingMicPermission:
+                    toastRef.showAutoRecordMissingPermission(
+                        eventTitle: event.title, permissionName: "Microphone")
+                case .missingProcessAudioPermission:
+                    toastRef.showAutoRecordMissingPermission(
+                        eventTitle: event.title, permissionName: "Audio Capture")
+                case .sourceUnavailableAndSkipFallback,
+                     .overlappingFireLostMatch,
+                     .eventStartedWhileMacAsleep:
+                    toastRef.showAutoRecordCancelled(eventTitle: event.title)
+                }
+            }
+        )
+        // Install the real permission check now that self.autoRecord is
+        // initialised and self is fully formed.
+        permissionCheckHolder = { [weak self] in
+            guard let self else { return nil }
+            if !self.permissions.screenRecording { return .missingScreenRecordingPermission }
+            if !self.permissions.microphone { return .missingMicPermission }
+            if !self.permissions.audioCapture { return .missingProcessAudioPermission }
+            return nil
+        }
+
         // Bridge the embedding queue's actor-isolated activity flag to the
         // MainActor @Published one so MenuBarLabel can observe it directly.
         // AppState lives for the lifetime of the app, so an unowned ref is
@@ -131,6 +194,42 @@ final class AppState: ObservableObject {
             // index, so the order isn't strictly required for correctness.
             self.queue.scanAndEnqueueOrphans(meetingsRoot: AppPreferences.shared.meetingsFolderURL)
         }
+
+        // Bridge scheduler state to the menu-bar label and the countdown panel.
+        autoRecord.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .idle:
+                    self.autoRecordCountdownRemaining = nil
+                    self.countdownPanel.dismiss()
+                case .armed:
+                    self.autoRecordCountdownRemaining = nil
+                    self.countdownPanel.dismiss()
+                case let .countingDown(event, subtitle, remaining):
+                    self.autoRecordCountdownRemaining = remaining
+                    self.countdownPanel.show(
+                        event: event,
+                        subtitle: subtitle,
+                        remaining: remaining,
+                        onCancel: { [weak self] in self?.autoRecord.cancelCurrentCountdown() },
+                        onStartNow: { [weak self] in self?.autoRecord.startNow() }
+                    )
+                }
+            }
+            .store(in: &cancellables)
+
+        // Re-evaluate the scheduler when auto-record prefs change.
+        Publishers.CombineLatest4(
+            prefsRef.$autoRecordEnabled,
+            prefsRef.$autoRecordCountdownSeconds,
+            prefsRef.$autoRecordEnabledCalendarIDs,
+            prefsRef.$autoRecordSourceFallback
+        )
+        .dropFirst()
+        .sink { [weak self] _, _, _, _ in self?.autoRecord.reevaluate() }
+        .store(in: &cancellables)
 
         // Keep the library pointed at whatever folder Settings is showing
         // — when the user picks a new meetings root the watcher swaps and
