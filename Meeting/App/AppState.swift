@@ -30,7 +30,7 @@ final class AppState: ObservableObject {
     /// tap action via the shared `UNUserNotificationCenterDelegate`.
     let notifier: CalendarNotifier
     let autoRecord: AutoRecordScheduler
-    let countdownPanel: AutoRecordCountdownPanel
+    private let countdownPanel: AutoRecordCountdownPanel
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
     /// True while `EmbeddingExtractionQueue` has at least one job pending or
@@ -197,7 +197,6 @@ final class AppState: ObservableObject {
 
         // Bridge scheduler state to the menu-bar label and the countdown panel.
         autoRecord.$state
-            .receive(on: RunLoop.main)
             .sink { [weak self] state in
                 guard let self else { return }
                 switch state {
