@@ -894,7 +894,8 @@ fileprivate func attendeePool(for meeting: MeetingRecord) -> [CalendarAttendee] 
             displayName: trimmed,
             email: nil,
             isMe: false,
-            role: nil
+            role: nil,
+            status: nil
         )
         if seenIDs.insert(synthesized.id).inserted {
             pool.append(synthesized)

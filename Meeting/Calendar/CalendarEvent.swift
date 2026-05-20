@@ -69,6 +69,11 @@ struct CalendarAttendee: Codable, Equatable, Hashable, Sendable, Identifiable {
     /// EKParticipantRole raw — "required", "optional", "non-participant",
     /// "chair", "unknown". Captured for completeness; not displayed yet.
     let role: String?
+    /// EKParticipantStatus raw — "accepted", "declined", "tentative",
+    /// "pending", "delegated", "completed", "in-process", "unknown".
+    /// Used by AutoRecordEligibility to skip events the user declined.
+    /// Optional so old `calendar.json` files decode unchanged.
+    let status: String?
 }
 
 // MARK: - On-disk file

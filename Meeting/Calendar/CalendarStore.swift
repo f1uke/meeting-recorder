@@ -239,7 +239,8 @@ final class CalendarStore: ObservableObject {
                     displayName: member.displayName,
                     email: member.email,
                     isMe: meEmails.contains(member.email),
-                    role: entry.role
+                    role: entry.role,
+                    status: entry.status
                 )
             }
         }
@@ -271,7 +272,8 @@ final class CalendarStore: ObservableObject {
             displayName: name,
             email: email,
             isMe: isMe,
-            role: roleString(p.participantRole)
+            role: roleString(p.participantRole),
+            status: statusString(p.participantStatus)
         )
     }
 
@@ -292,6 +294,20 @@ final class CalendarStore: ObservableObject {
         case .nonParticipant: return "non-participant"
         case .chair: return "chair"
         case .unknown: return "unknown"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private static func statusString(_ status: EKParticipantStatus) -> String {
+        switch status {
+        case .unknown: return "unknown"
+        case .pending: return "pending"
+        case .accepted: return "accepted"
+        case .declined: return "declined"
+        case .tentative: return "tentative"
+        case .delegated: return "delegated"
+        case .completed: return "completed"
+        case .inProcess: return "in-process"
         @unknown default: return "unknown"
         }
     }

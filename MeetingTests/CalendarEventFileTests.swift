@@ -19,11 +19,12 @@ final class CalendarEventFileTests: XCTestCase {
                 displayName: "Pim",
                 email: "pim@example.com",
                 isMe: false,
-                role: "chair"
+                role: "chair",
+                status: nil
             ),
             attendees: [
-                CalendarAttendee(displayName: "Fluke", email: "fluke@example.com", isMe: true, role: "required"),
-                CalendarAttendee(displayName: "Aon", email: nil, isMe: false, role: "optional"),
+                CalendarAttendee(displayName: "Fluke", email: "fluke@example.com", isMe: true, role: "required", status: nil),
+                CalendarAttendee(displayName: "Aon", email: nil, isMe: false, role: "optional", status: nil),
             ],
             openInCalendarURL: URL(string: "x-apple-calevent://evt-1")
         )
@@ -48,12 +49,13 @@ final class CalendarEventFileTests: XCTestCase {
                 displayName: "Pim",
                 email: "pim@example.com",
                 isMe: false,
-                role: nil
+                role: nil,
+                status: nil
             ),
             attendees: [
                 // Same email as organizer → dedupe.
-                CalendarAttendee(displayName: "Pim S.", email: "pim@example.com", isMe: false, role: nil),
-                CalendarAttendee(displayName: "Aon", email: "aon@example.com", isMe: false, role: nil),
+                CalendarAttendee(displayName: "Pim S.", email: "pim@example.com", isMe: false, role: nil, status: nil),
+                CalendarAttendee(displayName: "Aon", email: "aon@example.com", isMe: false, role: nil, status: nil),
             ],
             openInCalendarURL: nil
         )
@@ -72,8 +74,8 @@ final class CalendarEventFileTests: XCTestCase {
             calendarName: nil,
             organizer: nil,
             attendees: [
-                CalendarAttendee(displayName: "A", email: nil, isMe: false, role: nil),
-                CalendarAttendee(displayName: "B", email: nil, isMe: false, role: nil),
+                CalendarAttendee(displayName: "A", email: nil, isMe: false, role: nil, status: nil),
+                CalendarAttendee(displayName: "B", email: nil, isMe: false, role: nil, status: nil),
             ],
             openInCalendarURL: nil
         )
