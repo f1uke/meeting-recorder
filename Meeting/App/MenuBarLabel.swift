@@ -52,8 +52,19 @@ struct MenuBarLabel: View {
             .help("Extracting voice fingerprints from finished meetings")
 
         default:
-            Image(systemName: "captions.bubble.fill")
-                .font(.system(size: 13))
+            if let remaining = appState.autoRecordCountdownRemaining {
+                HStack(spacing: 4) {
+                    Image(systemName: "mic.fill")
+                        .foregroundStyle(Color.brandAccent)
+                    Text("\(remaining)s")
+                        .monospacedDigit()
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .help("Auto-record countdown")
+            } else {
+                Image(systemName: "captions.bubble.fill")
+                    .font(.system(size: 13))
+            }
         }
     }
 
