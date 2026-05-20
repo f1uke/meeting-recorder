@@ -5,6 +5,12 @@ import AppKit
 /// Returned by `AutoRecordSourceResolving.resolve` — lives at file scope so
 /// the protocol is self-contained and conformers don't have to import the
 /// concrete `AutoRecordSourceResolver` type.
+///
+/// Marked `@unchecked Sendable` because `CaptureSource` wraps `SCWindow` /
+/// `SCDisplay` (non-Sendable ObjC reference types). All callers run on
+/// `@MainActor`, so cross-isolation transfer doesn't actually occur; the
+/// annotation only exists to satisfy the `Sendable` constraint on the
+/// protocol — matches the project's `KitBox`/`DiarizerBox` pattern.
 enum AutoRecordResolveResult: @unchecked Sendable {
     case source(CaptureSource, subtitle: String)
     case skip(reason: String)

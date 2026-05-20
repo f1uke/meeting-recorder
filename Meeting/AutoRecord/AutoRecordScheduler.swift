@@ -13,6 +13,11 @@ final class AutoRecordScheduler: ObservableObject {
     /// inside this window get a `Task.sleep` scheduled to flip to
     /// `.countingDown`.
     static let armHorizon: TimeInterval = 60
+    /// Tolerance when deciding whether a new `reevaluate()` should re-arm for
+    /// the same event. Prevents churn when the calendar source re-publishes
+    /// with minor date drift (sub-30s start-time shifts keep the existing
+    /// armed state).
+    static let rearmTolerance: TimeInterval = 30
 
     @Published private(set) var state: AutoRecordState = .idle
 
@@ -99,7 +104,7 @@ final class AutoRecordScheduler: ObservableObject {
         // Same event still armed → keep going.
         if case let .armed(currentEvt, currentFireAt) = state,
            currentEvt.eventIdentifier == next.eventIdentifier,
-           abs(currentFireAt.timeIntervalSince(next.startDate)) <= 30 {
+           abs(currentFireAt.timeIntervalSince(next.startDate)) <= Self.rearmTolerance {
             return
         }
         arm(event: next)
@@ -133,13 +138,3 @@ final class AutoRecordScheduler: ObservableObject {
     }
 }
 
-/// Internal protocol the scheduler uses to read snapshots from a fake
-/// source in tests, without forcing the public `CalendarEventSource`
-/// protocol to expose mutable arrays. The production `CalendarStore`
-/// already exposes its arrays via `@Published`, so it doesn't need to
-/// conform.
-@MainActor
-protocol FakeEventSourceProtocol {
-    var fakeUpcoming: [CalendarEvent] { get }
-    var fakeCurrent: [CalendarEvent] { get }
-}

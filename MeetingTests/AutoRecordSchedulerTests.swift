@@ -84,13 +84,11 @@ final class AutoRecordSchedulerTests: XCTestCase {
 // MARK: - Test infrastructure
 
 @MainActor
-final class FakeEventSource: CalendarEventSource, FakeEventSourceProtocol {
+final class FakeEventSource: CalendarEventSource {
     @Published var current: [CalendarEvent] = []
     @Published var upcoming: [CalendarEvent] = []
     var currentEventsPublisher: Published<[CalendarEvent]>.Publisher { $current }
     var upcomingEventsPublisher: Published<[CalendarEvent]>.Publisher { $upcoming }
-    var fakeUpcoming: [CalendarEvent] { upcoming }
-    var fakeCurrent: [CalendarEvent] { current }
 }
 
 @MainActor
