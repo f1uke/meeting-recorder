@@ -328,6 +328,28 @@ final class CalendarStore: ObservableObject {
         return AppPreferences.shared.myEmails
     }
 
+    /// Lightweight projection of the user's EventKit calendars for the
+    /// Settings UI. Title comes from `EKCalendar.title`; subtitle is the
+    /// source title when it looks like an email (Google Workspace), else
+    /// nil. ID is the stable `calendarIdentifier`.
+    struct CalendarListEntry: Identifiable, Hashable {
+        let id: String
+        let title: String
+        let subtitle: String?
+    }
+
+    func allCalendars() -> [CalendarListEntry] {
+        store.calendars(for: .event).map { cal in
+            let src = cal.source.title
+            let sub: String? = src.contains("@") ? src : nil
+            return CalendarListEntry(
+                id: cal.calendarIdentifier,
+                title: cal.title,
+                subtitle: sub
+            )
+        }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
     /// Best-effort guesses for the user's own email addresses, derived
     /// from EventKit metadata. Drives the "Suggested" chips in
     /// Settings → Calendar so the user doesn't have to type emails by
