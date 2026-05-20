@@ -124,3 +124,14 @@ extension JSONDecoder {
         return d
     }()
 }
+
+// MARK: - Event source abstraction
+
+/// Read-only interface used by `AutoRecordScheduler` to subscribe to
+/// upcoming and current events. Lets the scheduler be unit-tested with a
+/// synthetic source that doesn't touch EventKit.
+@MainActor
+protocol CalendarEventSource: AnyObject {
+    var currentEventsPublisher: Published<[CalendarEvent]>.Publisher { get }
+    var upcomingEventsPublisher: Published<[CalendarEvent]>.Publisher { get }
+}

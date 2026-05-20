@@ -366,3 +366,10 @@ final class CalendarStore: ObservableObject {
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
+
+// MARK: - CalendarEventSource conformance
+
+extension CalendarStore: CalendarEventSource {
+    var currentEventsPublisher: Published<[CalendarEvent]>.Publisher { $currentEvents }
+    var upcomingEventsPublisher: Published<[CalendarEvent]>.Publisher { $upcomingEvents }
+}
