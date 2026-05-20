@@ -138,9 +138,11 @@ final class AutoRecordScheduler: ObservableObject {
               let source = pendingSource else { return }
         countdownTask?.cancel()
         countdownTask = nil
-        Task { [weak self] in
-            guard let self else { return }
-            await self.fire(source: source, event: evt)
+        pendingSource = nil
+        state = .idle
+        let onStart = onStartOverride ?? self.onStart
+        Task {
+            await onStart(source, evt)
         }
     }
 

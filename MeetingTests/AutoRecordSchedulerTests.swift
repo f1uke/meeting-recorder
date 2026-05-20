@@ -246,10 +246,15 @@ final class AutoRecordSchedulerTests: XCTestCase {
     /// the test if Screen Recording isn't permissioned in the runner.
     @MainActor
     private func realDisplaySource() async throws -> CaptureSource {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            true, onScreenWindowsOnly: true)
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                true, onScreenWindowsOnly: true)
+        } catch {
+            throw XCTSkip("Screen Recording permission unavailable: \(error)")
+        }
         try XCTSkipIf(content.displays.isEmpty,
-                      "Test requires at least one display via SCShareableContent")
+                      "No displays found via SCShareableContent")
         return .display(content.displays[0])
     }
 }
