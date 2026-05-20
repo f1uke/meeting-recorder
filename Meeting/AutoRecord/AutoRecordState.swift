@@ -2,7 +2,7 @@ import Foundation
 
 /// State machine for `AutoRecordScheduler`. Held in a `@Published` property
 /// so SwiftUI surfaces (menu-bar label, countdown panel) can observe.
-enum AutoRecordState: Equatable {
+enum AutoRecordState: Equatable, Sendable {
     case idle
 
     /// Scheduler has identified the next event to fire on and is waiting
@@ -21,7 +21,7 @@ enum AutoRecordState: Equatable {
 /// Reason an event was skipped instead of fired. Surfaced to the user via
 /// `ToastPresenter` and recorded in the scheduler's session-local
 /// suppressed-IDs set.
-enum AutoRecordSuppressionReason: Equatable {
+enum AutoRecordSuppressionReason: Equatable, Sendable {
     case userCancelledThisOccurrence
     case alreadyRecording
     case missingScreenRecordingPermission
