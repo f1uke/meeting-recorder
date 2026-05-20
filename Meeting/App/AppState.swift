@@ -35,6 +35,11 @@ final class AppState: ObservableObject {
     /// running. Drives the MenuBarLabel "Embedding" indicator so the user knows
     /// when post-transcript voice fingerprint extraction is still going on.
     @Published private(set) var isExtractingEmbeddings: Bool = false
+    /// Remaining seconds on the auto-record countdown, or nil when no
+    /// countdown is active. Used by `MenuBarLabel` to render the "🎙 4s"
+    /// pre-recording variant. Updated from the AutoRecordScheduler's
+    /// `state` publisher in Task 15.
+    @Published private(set) var autoRecordCountdownRemaining: Int?
 
     private var cancellables: Set<AnyCancellable> = []
 
@@ -241,7 +246,7 @@ final class AppState: ObservableObject {
         library.rescan()
         queue.enqueue(
             meetingFolder: folder,
-            expectedSpeakers: AppPreferences.shared.expectedSpeakerCount.pyannoteValue
+            expectedSpeakers: nil
         )
     }
 
@@ -260,7 +265,7 @@ final class AppState: ObservableObject {
     func retranscribe(_ meeting: MeetingRecord) async {
         queue.enqueue(
             meetingFolder: meeting.folder,
-            expectedSpeakers: AppPreferences.shared.expectedSpeakerCount.pyannoteValue
+            expectedSpeakers: nil
         )
     }
 
