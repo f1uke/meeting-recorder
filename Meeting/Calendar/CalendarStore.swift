@@ -255,6 +255,7 @@ final class CalendarStore: ObservableObject {
             location: event.location?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             conferenceURL: conferenceURL(from: event),
             calendarName: event.calendar?.title,
+            calendarIdentifier: event.calendar?.calendarIdentifier,
             organizer: organizer,
             attendees: attendees,
             openInCalendarURL: openURL

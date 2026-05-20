@@ -187,6 +187,7 @@ final class MeetingNoteRendererTests: XCTestCase {
                 location: "Zoom",
                 conferenceURL: URL(string: "https://zoom.us/j/123"),
                 calendarName: "Work",
+                calendarIdentifier: nil,
                 organizer: nil,
                 attendees: [],
                 openInCalendarURL: nil

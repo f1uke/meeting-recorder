@@ -15,6 +15,7 @@ final class CalendarEventFileTests: XCTestCase {
             location: "Conference Room A",
             conferenceURL: URL(string: "https://zoom.us/j/456"),
             calendarName: "Work",
+            calendarIdentifier: "cal-work-123",
             organizer: CalendarAttendee(
                 displayName: "Pim",
                 email: "pim@example.com",
@@ -45,6 +46,7 @@ final class CalendarEventFileTests: XCTestCase {
             location: nil,
             conferenceURL: nil,
             calendarName: nil,
+            calendarIdentifier: nil,
             organizer: CalendarAttendee(
                 displayName: "Pim",
                 email: "pim@example.com",
@@ -72,6 +74,7 @@ final class CalendarEventFileTests: XCTestCase {
             location: nil,
             conferenceURL: nil,
             calendarName: nil,
+            calendarIdentifier: nil,
             organizer: nil,
             attendees: [
                 CalendarAttendee(displayName: "A", email: nil, isMe: false, role: nil, status: nil),
@@ -91,6 +94,7 @@ final class CalendarEventFileTests: XCTestCase {
             startDate: now.addingTimeInterval(-60),
             endDate: now.addingTimeInterval(60),
             location: nil, conferenceURL: nil, calendarName: nil,
+            calendarIdentifier: nil,
             organizer: nil, attendees: [], openInCalendarURL: nil
         )
         XCTAssertTrue(happening.isHappeningNow)
@@ -102,6 +106,7 @@ final class CalendarEventFileTests: XCTestCase {
             startDate: now.addingTimeInterval(60),
             endDate: now.addingTimeInterval(120),
             location: nil, conferenceURL: nil, calendarName: nil,
+            calendarIdentifier: nil,
             organizer: nil, attendees: [], openInCalendarURL: nil
         )
         XCTAssertFalse(upcoming.isHappeningNow)

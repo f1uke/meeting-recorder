@@ -23,6 +23,11 @@ struct CalendarEvent: Codable, Equatable, Hashable, Sendable, Identifiable {
     /// window app (Zoom URL → Zoom window).
     let conferenceURL: URL?
     let calendarName: String?
+    /// EKCalendar.calendarIdentifier — stable per calendar in the user's
+    /// EventKit store. Used by `AutoRecordEligibility` to decide whether
+    /// this event is on a calendar the user enabled for auto-record.
+    /// Optional so old on-disk `calendar.json` files decode unchanged.
+    let calendarIdentifier: String?
     let organizer: CalendarAttendee?
     let attendees: [CalendarAttendee]
     /// Optional URL the user can click to jump back to Calendar.app.

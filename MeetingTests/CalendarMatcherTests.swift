@@ -20,6 +20,7 @@ final class CalendarMatcherTests: XCTestCase {
             location: nil,
             conferenceURL: conferenceURL,
             calendarName: "Work",
+            calendarIdentifier: nil,
             organizer: nil,
             attendees: [],
             openInCalendarURL: nil
