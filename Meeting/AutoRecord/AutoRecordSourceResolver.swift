@@ -2,24 +2,27 @@ import Foundation
 import ScreenCaptureKit
 import AppKit
 
+/// Returned by `AutoRecordSourceResolving.resolve` — lives at file scope so
+/// the protocol is self-contained and conformers don't have to import the
+/// concrete `AutoRecordSourceResolver` type.
+enum AutoRecordResolveResult {
+    case source(CaptureSource, subtitle: String)
+    case skip(reason: String)
+}
+
 /// Async protocol so `AutoRecordScheduler` can be tested with a stub
 /// resolver that doesn't touch ScreenCaptureKit.
 protocol AutoRecordSourceResolving: Sendable {
     func resolve(
         event: CalendarEvent,
         fallback: AutoRecordSourceFallback
-    ) async -> AutoRecordSourceResolver.ResolveResult
+    ) async -> AutoRecordResolveResult
 }
 
 /// Concrete implementation. Produces a `CaptureSource` + subtitle for the
 /// countdown panel, or a `.skip` directive when the user picked the skip
 /// fallback and no matching window exists.
 struct AutoRecordSourceResolver: AutoRecordSourceResolving {
-
-    enum ResolveResult {
-        case source(CaptureSource, subtitle: String)
-        case skip(reason: String)
-    }
 
     /// Small value type the pure tie-break helper operates on, decoupled
     /// from the real `SCWindow` which has no public init.
@@ -31,7 +34,7 @@ struct AutoRecordSourceResolver: AutoRecordSourceResolving {
     func resolve(
         event: CalendarEvent,
         fallback: AutoRecordSourceFallback
-    ) async -> ResolveResult {
+    ) async -> AutoRecordResolveResult {
         // 1. No conference URL → primary display.
         guard let url = event.conferenceURL else {
             return await displayFallbackResult(event: event, fallback: fallback)
@@ -63,13 +66,20 @@ struct AutoRecordSourceResolver: AutoRecordSourceResolving {
         }
 
         if matchingWindows.isEmpty {
-            return await displayFallbackResult(event: event, fallback: fallback)
+            return await displayFallbackResult(event: event, fallback: fallback, content: content)
         }
 
-        // 5. Tie-break.
-        let matchedBundleID = matchingWindows.first?.owningApplication?.bundleIdentifier ?? ""
-        let preferredSubstrings = ConferenceURLAppMap
-            .preferredTitleSubstrings(forBundleID: matchedBundleID)
+        // 5. Tie-break — union preferred substrings across all matched bundles
+        // so that, e.g., Chrome AND Safari windows for meet.google.com are all
+        // scored with the correct preferred-title hints.
+        let bundlesInResults = Set(matchingWindows.compactMap { $0.owningApplication?.bundleIdentifier })
+        let preferredSubstrings = Array(Set(
+            bundlesInResults.flatMap { ConferenceURLAppMap.preferredTitleSubstrings(forBundleID: $0) }
+        ))
+        // Keep the first window's bundle ID only for the display-name lookup;
+        // in practice all bundles for a given host resolve to the same name.
+        let displayBundle = matchingWindows.first?.owningApplication?.bundleIdentifier ?? ""
+
         let candidates = matchingWindows.map { window in
             let area = Double(window.frame.width) * Double(window.frame.height)
             return WindowCandidate(title: window.title ?? "", area: area)
@@ -79,7 +89,7 @@ struct AutoRecordSourceResolver: AutoRecordSourceResolving {
             preferredSubstrings: preferredSubstrings,
             eventTitleHint: event.title
         ) else {
-            return await displayFallbackResult(event: event, fallback: fallback)
+            return await displayFallbackResult(event: event, fallback: fallback, content: content)
         }
 
         // Map the chosen candidate back to its SCWindow by title + area.
@@ -90,7 +100,7 @@ struct AutoRecordSourceResolver: AutoRecordSourceResolving {
         } ?? matchingWindows[0]
 
         let displayName = ConferenceURLAppMap
-            .displayName(forBundleID: matchedBundleID) ?? "Meeting"
+            .displayName(forBundleID: displayBundle) ?? "Meeting"
         let subtitle = Self.subtitleForMatchedWindow(
             displayName: displayName,
             attendeeCount: event.totalAttendeeCount
@@ -127,10 +137,11 @@ struct AutoRecordSourceResolver: AutoRecordSourceResolving {
     }
 
     static func subtitleForMatchedWindow(displayName: String, attendeeCount: Int) -> String {
-        if attendeeCount > 0 {
-            return "\(displayName) · \(attendeeCount) attendees"
+        switch attendeeCount {
+        case 0: return displayName
+        case 1: return "\(displayName) · 1 attendee"
+        default: return "\(displayName) · \(attendeeCount) attendees"
         }
-        return displayName
     }
 
     static func subtitleForDisplayFallback(event: CalendarEvent, displayName: String) -> String {
@@ -145,10 +156,13 @@ struct AutoRecordSourceResolver: AutoRecordSourceResolving {
 
     // MARK: - Private
 
+    /// Resolve the display fallback, optionally reusing an already-fetched
+    /// `SCShareableContent` to avoid a redundant round-trip to ScreenCaptureKit.
     private func displayFallbackResult(
         event: CalendarEvent,
-        fallback: AutoRecordSourceFallback
-    ) async -> ResolveResult {
+        fallback: AutoRecordSourceFallback,
+        content: SCShareableContent? = nil
+    ) async -> AutoRecordResolveResult {
         switch fallback {
         case .skip:
             let url = event.conferenceURL
@@ -158,16 +172,14 @@ struct AutoRecordSourceResolver: AutoRecordSourceResolving {
             } ?? "meeting"
             return .skip(reason: "couldn't find \(appName) window")
         case .display:
-            let content: SCShareableContent?
-            do {
-                content = try await SCShareableContent.excludingDesktopWindows(
-                    true, onScreenWindowsOnly: true
-                )
-            } catch {
-                content = nil
+            let displays: [SCDisplay]
+            if let content {
+                displays = content.displays
+            } else {
+                displays = (try? await SCShareableContent.excludingDesktopWindows(
+                    true, onScreenWindowsOnly: true).displays) ?? []
             }
-            let display = content?.displays.first { $0.displayID == CGMainDisplayID() }
-                ?? content?.displays.first
+            let display = displays.first { $0.displayID == CGMainDisplayID() } ?? displays.first
             let label = display.map { CaptureSource.displayLabel(displayID: $0.displayID) }
                 ?? "primary display"
             let subtitle = Self.subtitleForDisplayFallback(event: event, displayName: label)

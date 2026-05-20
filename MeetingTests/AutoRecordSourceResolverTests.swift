@@ -36,6 +36,14 @@ final class AutoRecordSourceResolverTests: XCTestCase {
         XCTAssertEqual(line, "Zoom")
     }
 
+    func test_subtitle_withMatchedWindow_oneAttendee_isSingular() {
+        let line = AutoRecordSourceResolver.subtitleForMatchedWindow(
+            displayName: "Zoom",
+            attendeeCount: 1
+        )
+        XCTAssertEqual(line, "Zoom · 1 attendee")
+    }
+
     func test_pickBestWindow_prefersPreferredTitleSubstring() {
         let candidates: [AutoRecordSourceResolver.WindowCandidate] = [
             .init(title: "Zoom", area: 1_000_000),       // home window, huge
