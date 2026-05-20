@@ -5,7 +5,7 @@ import AppKit
 /// Returned by `AutoRecordSourceResolving.resolve` — lives at file scope so
 /// the protocol is self-contained and conformers don't have to import the
 /// concrete `AutoRecordSourceResolver` type.
-enum AutoRecordResolveResult {
+enum AutoRecordResolveResult: @unchecked Sendable {
     case source(CaptureSource, subtitle: String)
     case skip(reason: String)
 }
