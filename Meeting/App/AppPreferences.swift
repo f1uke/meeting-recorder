@@ -150,6 +150,37 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(identityMinSuggestScore, forKey: Keys.identityMinSuggestScore) }
     }
 
+    /// Master toggle for the auto-record feature. Off by default — users
+    /// have to opt in. When off, the scheduler stays idle even if other
+    /// settings are populated.
+    @Published var autoRecordEnabled: Bool {
+        didSet { UserDefaults.standard.set(autoRecordEnabled, forKey: Keys.autoRecordEnabled) }
+    }
+
+    /// Countdown duration in seconds shown before recording starts. UI
+    /// constrains to {3, 5, 10, 30}; out-of-range values get clamped.
+    @Published var autoRecordCountdownSeconds: Int {
+        didSet { UserDefaults.standard.set(autoRecordCountdownSeconds, forKey: Keys.autoRecordCountdownSeconds) }
+    }
+
+    /// EventKit calendar identifiers the user explicitly opted in to.
+    /// Stored as a comma-separated string in UserDefaults. Empty set +
+    /// `autoRecordEnabled == true` is a valid state (scheduler stays idle,
+    /// Settings shows a "pick at least one calendar" nudge).
+    @Published var autoRecordEnabledCalendarIDs: Set<String> {
+        didSet {
+            UserDefaults.standard.set(
+                autoRecordEnabledCalendarIDs.sorted().joined(separator: ","),
+                forKey: Keys.autoRecordEnabledCalendarIDs
+            )
+        }
+    }
+
+    /// Behavior when source resolution finds no matching window.
+    @Published var autoRecordSourceFallback: AutoRecordSourceFallback {
+        didSet { UserDefaults.standard.set(autoRecordSourceFallback.rawValue, forKey: Keys.autoRecordSourceFallback) }
+    }
+
     private init() {
         let raw = UserDefaults.standard.object(forKey: Keys.expectedSpeakers) as? Int
         self.expectedSpeakerCount = ExpectedSpeakers(storageValue: raw)
@@ -204,6 +235,18 @@ final class AppPreferences: ObservableObject {
         self.identitySuggestionsEnabled = (UserDefaults.standard.object(forKey: Keys.identitySuggestionsEnabled) as? Bool) ?? true
         let storedMin = UserDefaults.standard.object(forKey: Keys.identityMinSuggestScore) as? Double
         self.identityMinSuggestScore = storedMin ?? 0.45
+        self.autoRecordEnabled = UserDefaults.standard.bool(forKey: Keys.autoRecordEnabled)
+        let storedCountdown = UserDefaults.standard.integer(forKey: Keys.autoRecordCountdownSeconds)
+        let allowed: Set<Int> = [3, 5, 10, 30]
+        self.autoRecordCountdownSeconds = allowed.contains(storedCountdown) ? storedCountdown : 5
+        let rawCalIDs = UserDefaults.standard.string(forKey: Keys.autoRecordEnabledCalendarIDs) ?? ""
+        self.autoRecordEnabledCalendarIDs = Set(
+            rawCalIDs.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        )
+        self.autoRecordSourceFallback = AutoRecordSourceFallback(
+            rawValue: UserDefaults.standard.string(forKey: Keys.autoRecordSourceFallback) ?? ""
+        ) ?? .display
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -259,6 +302,10 @@ final class AppPreferences: ObservableObject {
         static let meetingsFolder = "dev.fluke.meeting.meetingsFolder"
         static let identitySuggestionsEnabled = "dev.fluke.meeting.identitySuggestionsEnabled"
         static let identityMinSuggestScore = "dev.fluke.meeting.identityMinSuggestScore"
+        static let autoRecordEnabled = "dev.fluke.meeting.autoRecordEnabled"
+        static let autoRecordCountdownSeconds = "dev.fluke.meeting.autoRecordCountdownSeconds"
+        static let autoRecordEnabledCalendarIDs = "dev.fluke.meeting.autoRecordEnabledCalendarIDs"
+        static let autoRecordSourceFallback = "dev.fluke.meeting.autoRecordSourceFallback"
     }
 }
 
@@ -585,6 +632,25 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
         case .system: NSApp.appearance = nil
         case .light: NSApp.appearance = NSAppearance(named: .aqua)
         case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
+// MARK: - Auto-record source fallback
+
+/// What auto-record does when source resolution finds no window matching the
+/// event's conference URL. `display` records the primary display anyway
+/// (default). `skip` cancels the countdown with a toast.
+enum AutoRecordSourceFallback: String, CaseIterable, Sendable, Identifiable {
+    case display
+    case skip
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .display: return "Record the primary display instead"
+        case .skip:    return "Skip the recording entirely"
         }
     }
 }
