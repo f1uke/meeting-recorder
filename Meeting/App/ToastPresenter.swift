@@ -28,7 +28,9 @@ final class ToastPresenter: ObservableObject {
         present(view: ToastView(
             info: info,
             onOpen: { [weak self] in
-                NSWorkspace.shared.activateFileViewerSelecting([info.openTarget])
+                if let url = info.openTarget {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
                 self?.dismiss()
             },
             onDismiss: { [weak self] in self?.dismiss() }
@@ -51,9 +53,66 @@ final class ToastPresenter: ObservableObject {
         present(view: ToastView(
             info: info,
             onOpen: { [weak self] in
-                NSWorkspace.shared.activateFileViewerSelecting([info.openTarget])
+                if let url = info.openTarget {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
                 self?.dismiss()
             },
+            onDismiss: { [weak self] in self?.dismiss() }
+        ))
+        scheduleAutoDismiss(after: 6)
+    }
+
+    // MARK: - Auto-record informational toasts
+
+    /// Shown when auto-record fires but another session is already running.
+    func showAutoRecordSkippedAlreadyRecording(eventTitle: String) {
+        let info = ToastInfo(
+            headline: "Auto-record skipped",
+            title: eventTitle,
+            subtitle: "Already recording another session",
+            openTarget: nil,
+            folder: nil
+        )
+        present(view: ToastView(
+            info: info,
+            onOpen: { [weak self] in self?.dismiss() },
+            onDismiss: { [weak self] in self?.dismiss() }
+        ))
+        scheduleAutoDismiss(after: 5)
+    }
+
+    /// Shown when the user dismissed the countdown panel (or the event was
+    /// suppressed for this occurrence) and auto-record will not start.
+    func showAutoRecordCancelled(eventTitle: String) {
+        let info = ToastInfo(
+            headline: "Auto-record cancelled",
+            title: eventTitle,
+            subtitle: "Press the menu-bar icon to record manually",
+            openTarget: nil,
+            folder: nil
+        )
+        present(view: ToastView(
+            info: info,
+            onOpen: { [weak self] in self?.dismiss() },
+            onDismiss: { [weak self] in self?.dismiss() }
+        ))
+        scheduleAutoDismiss(after: 5)
+    }
+
+    /// Shown when auto-record is blocked because a required TCC permission
+    /// has not been granted.
+    func showAutoRecordMissingPermission(eventTitle: String, permissionName: String) {
+        let info = ToastInfo(
+            headline: "Auto-record needs \(permissionName)",
+            title: eventTitle,
+            subtitle: "Open Settings to grant access",
+            openTarget: nil,
+            folder: nil
+        )
+        present(view: ToastView(
+            info: info,
+            onOpen: { [weak self] in self?.dismiss() },
             onDismiss: { [weak self] in self?.dismiss() }
         ))
         scheduleAutoDismiss(after: 6)
@@ -81,7 +140,9 @@ final class ToastPresenter: ObservableObject {
         present(view: ToastView(
             info: info,
             onOpen: { [weak self] in
-                NSWorkspace.shared.activateFileViewerSelecting([info.openTarget])
+                if let url = info.openTarget {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
                 self?.dismiss()
             },
             onDismiss: { [weak self] in self?.dismiss() }
@@ -186,8 +247,9 @@ struct ToastInfo: Sendable {
     let headline: String
     let title: String
     let subtitle: String
-    let openTarget: URL
-    let folder: URL
+    /// When `nil` the Open button is hidden (informational-only toasts).
+    let openTarget: URL?
+    let folder: URL?
 }
 
 struct ToastView: View {
@@ -220,7 +282,9 @@ struct ToastView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button("Open", action: onOpen)
+            if info.openTarget != nil {
+                Button("Open", action: onOpen)
+            }
 
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
