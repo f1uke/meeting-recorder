@@ -2,7 +2,12 @@ import Foundation
 import ScreenCaptureKit
 import AppKit
 
-enum CaptureSource {
+/// `@unchecked Sendable` because `SCWindow` / `SCDisplay` are ObjC reference
+/// types that the compiler can't verify. All cross-actor transfers happen
+/// inside `@MainActor`-isolated code; the annotation satisfies Swift 6 strict
+/// concurrency without introducing real races — mirrors the project's
+/// `KitBox`/`DiarizerBox`/`AutoRecordResolveResult` pattern.
+enum CaptureSource: @unchecked Sendable {
     case window(SCWindow)
     case display(SCDisplay)
 

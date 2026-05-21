@@ -95,25 +95,10 @@ enum CalendarMatcher {
         return Score(total: total, reason: notes.joined(separator: ", "))
     }
 
-    /// Lightweight bundle-id ↔ URL host correlation. Easy to extend.
+    /// Lightweight bundle-id ↔ URL host correlation, delegated to the
+    /// shared app map so the auto-record source resolver and this scorer
+    /// stay aligned.
     private static func appMatchesURL(bundleID: String, url: URL) -> Bool {
-        guard let host = url.host?.lowercased() else { return false }
-        let lowerBundle = bundleID.lowercased()
-        let pairs: [(bundlePrefix: String, hostSuffixes: [String])] = [
-            ("us.zoom",                ["zoom.us", "zoom.com"]),
-            ("com.google.chrome",      ["meet.google.com"]),    // Meet often opens in Chrome
-            ("com.google.meetings",    ["meet.google.com"]),
-            ("com.apple.safari",       ["meet.google.com"]),
-            ("com.microsoft.teams",    ["teams.microsoft.com", "teams.live.com"]),
-            ("com.cisco.webex",        ["webex.com"]),
-            ("com.hnc.discord",        ["discord.com", "discord.gg"]),
-            ("com.tinyspeck.slackmacgap", ["slack.com"]),
-        ]
-        for pair in pairs where lowerBundle.hasPrefix(pair.bundlePrefix) {
-            if pair.hostSuffixes.contains(where: { host == $0 || host.hasSuffix(".\($0)") }) {
-                return true
-            }
-        }
-        return false
+        ConferenceURLAppMap.appMatchesURL(bundleID: bundleID, url: url)
     }
 }

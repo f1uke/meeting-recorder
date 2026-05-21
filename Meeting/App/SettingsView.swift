@@ -1070,6 +1070,7 @@ private struct PermissionSettingRow: View {
 private struct CalendarTab: View {
     @ObservedObject private var prefs = AppPreferences.shared
     @EnvironmentObject private var calendar: CalendarStore
+    @EnvironmentObject private var appState: AppState
     @State private var draftEmail: String = ""
     @State private var draftError: String?
 
@@ -1164,6 +1165,104 @@ private struct CalendarTab: View {
             SettingsSection(label: "Group expansions") {
                 GroupExpansionsEditor()
             }
+
+            SettingsSection(label: "Auto-record") {
+                ToggleRow(
+                    title: "Auto-record calendar meetings",
+                    description: "Start a recording with a \(prefs.autoRecordCountdownSeconds)-second confirmation when an eligible event begins.",
+                    isOn: Binding(
+                        get: { prefs.autoRecordEnabled },
+                        set: { prefs.autoRecordEnabled = $0 }
+                    )
+                )
+
+                Divider().opacity(0.4)
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Confirmation window")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.textPrimary)
+                        Text("How long to show the countdown before auto-starting.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.textDim)
+                    }
+                    Spacer(minLength: 8)
+                    Picker("", selection: Binding(
+                        get: { prefs.autoRecordCountdownSeconds },
+                        set: { prefs.autoRecordCountdownSeconds = $0 }
+                    )) {
+                        Text("3 s").tag(3)
+                        Text("5 s").tag(5)
+                        Text("10 s").tag(10)
+                        Text("30 s").tag(30)
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                    .disabled(!prefs.autoRecordEnabled)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+
+                Divider().opacity(0.4)
+
+                if calendar.authorization == .authorized {
+                    AutoRecordCalendarList(prefs: prefs, store: calendar)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .disabled(!prefs.autoRecordEnabled)
+                } else {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Calendars")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.textPrimary)
+                            Text("Grant access to choose which calendars trigger auto-record.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.textDim)
+                        }
+                        Spacer(minLength: 8)
+                        Button("Grant Calendar access") {
+                            Task { await appState.request(.calendar) }
+                        }
+                        .disabled(!prefs.autoRecordEnabled)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                }
+
+                Divider().opacity(0.4)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("When auto-record can't capture the right window".uppercased())
+                        .font(.system(size: 10, weight: .bold))
+                        .kerning(1.0)
+                        .foregroundStyle(Color.textDim)
+                    Picker("", selection: Binding(
+                        get: { prefs.autoRecordSourceFallback },
+                        set: { prefs.autoRecordSourceFallback = $0 }
+                    )) {
+                        ForEach(AutoRecordSourceFallback.allCases) { f in
+                            Text(f.label).tag(f)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .labelsHidden()
+                    .disabled(!prefs.autoRecordEnabled)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+
+                if prefs.autoRecordEnabled
+                    && prefs.autoRecordEnabledCalendarIDs.isEmpty
+                    && calendar.authorization == .authorized {
+                    InlineNote(
+                        text: "Pick at least one calendar above — auto-record won't fire until you do.",
+                        tone: .warning
+                    )
+                }
+            }
         }
     }
 
@@ -1189,6 +1288,51 @@ private struct CalendarTab: View {
         var updated = prefs.myEmails
         updated.remove(email)
         prefs.myEmails = updated
+    }
+}
+
+// MARK: - Auto-record calendar list
+
+private struct AutoRecordCalendarList: View {
+    @ObservedObject var prefs: AppPreferences
+    @ObservedObject var store: CalendarStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Calendars")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.textDim)
+                .padding(.bottom, 2)
+            ForEach(store.allCalendars()) { entry in
+                Toggle(isOn: binding(for: entry.id)) {
+                    HStack(spacing: 6) {
+                        Text(entry.title)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.textPrimary)
+                        if let sub = entry.subtitle {
+                            Text(sub)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.textDim)
+                        }
+                    }
+                }
+                .toggleStyle(.checkbox)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func binding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { prefs.autoRecordEnabledCalendarIDs.contains(id) },
+            set: { newValue in
+                if newValue {
+                    prefs.autoRecordEnabledCalendarIDs.insert(id)
+                } else {
+                    prefs.autoRecordEnabledCalendarIDs.remove(id)
+                }
+            }
+        )
     }
 }
 

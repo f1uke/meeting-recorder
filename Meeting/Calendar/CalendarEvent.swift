@@ -23,6 +23,11 @@ struct CalendarEvent: Codable, Equatable, Hashable, Sendable, Identifiable {
     /// window app (Zoom URL → Zoom window).
     let conferenceURL: URL?
     let calendarName: String?
+    /// EKCalendar.calendarIdentifier — stable per calendar in the user's
+    /// EventKit store. Used by `AutoRecordEligibility` to decide whether
+    /// this event is on a calendar the user enabled for auto-record.
+    /// Optional so old on-disk `calendar.json` files decode unchanged.
+    let calendarIdentifier: String?
     let organizer: CalendarAttendee?
     let attendees: [CalendarAttendee]
     /// Optional URL the user can click to jump back to Calendar.app.
@@ -69,6 +74,11 @@ struct CalendarAttendee: Codable, Equatable, Hashable, Sendable, Identifiable {
     /// EKParticipantRole raw — "required", "optional", "non-participant",
     /// "chair", "unknown". Captured for completeness; not displayed yet.
     let role: String?
+    /// EKParticipantStatus raw — "accepted", "declined", "tentative",
+    /// "pending", "delegated", "completed", "in-process", "unknown".
+    /// Used by AutoRecordEligibility to skip events the user declined.
+    /// Optional so old `calendar.json` files decode unchanged.
+    let status: String?
 }
 
 // MARK: - On-disk file
@@ -113,4 +123,15 @@ extension JSONDecoder {
         d.dateDecodingStrategy = .iso8601
         return d
     }()
+}
+
+// MARK: - Event source abstraction
+
+/// Read-only interface used by `AutoRecordScheduler` to subscribe to
+/// upcoming and current events. Lets the scheduler be unit-tested with a
+/// synthetic source that doesn't touch EventKit.
+@MainActor
+protocol CalendarEventSource: AnyObject {
+    var currentEventsPublisher: Published<[CalendarEvent]>.Publisher { get }
+    var upcomingEventsPublisher: Published<[CalendarEvent]>.Publisher { get }
 }

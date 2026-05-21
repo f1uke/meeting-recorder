@@ -239,7 +239,8 @@ final class CalendarStore: ObservableObject {
                     displayName: member.displayName,
                     email: member.email,
                     isMe: meEmails.contains(member.email),
-                    role: entry.role
+                    role: entry.role,
+                    status: entry.status
                 )
             }
         }
@@ -254,6 +255,7 @@ final class CalendarStore: ObservableObject {
             location: event.location?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             conferenceURL: conferenceURL(from: event),
             calendarName: event.calendar?.title,
+            calendarIdentifier: event.calendar?.calendarIdentifier,
             organizer: organizer,
             attendees: attendees,
             openInCalendarURL: openURL
@@ -271,7 +273,8 @@ final class CalendarStore: ObservableObject {
             displayName: name,
             email: email,
             isMe: isMe,
-            role: roleString(p.participantRole)
+            role: roleString(p.participantRole),
+            status: statusString(p.participantStatus)
         )
     }
 
@@ -296,6 +299,20 @@ final class CalendarStore: ObservableObject {
         }
     }
 
+    private static func statusString(_ status: EKParticipantStatus) -> String {
+        switch status {
+        case .unknown: return "unknown"
+        case .pending: return "pending"
+        case .accepted: return "accepted"
+        case .declined: return "declined"
+        case .tentative: return "tentative"
+        case .delegated: return "delegated"
+        case .completed: return "completed"
+        case .inProcess: return "in-process"
+        @unknown default: return "unknown"
+        }
+    }
+
     private static func mapAuth(_ status: EKAuthorizationStatus) -> Authorization {
         switch status {
         case .notDetermined: return .notDetermined
@@ -309,6 +326,28 @@ final class CalendarStore: ObservableObject {
     private func meEmails() -> Set<String> {
         if let override = meEmailsOverride { return override }
         return AppPreferences.shared.myEmails
+    }
+
+    /// Lightweight projection of the user's EventKit calendars for the
+    /// Settings UI. Title comes from `EKCalendar.title`; subtitle is the
+    /// source title when it looks like an email (Google Workspace), else
+    /// nil. ID is the stable `calendarIdentifier`.
+    struct CalendarListEntry: Identifiable, Hashable {
+        let id: String
+        let title: String
+        let subtitle: String?
+    }
+
+    func allCalendars() -> [CalendarListEntry] {
+        store.calendars(for: .event).map { cal in
+            let src = cal.source.title
+            let sub: String? = src.contains("@") ? src : nil
+            return CalendarListEntry(
+                id: cal.calendarIdentifier,
+                title: cal.title,
+                subtitle: sub
+            )
+        }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     /// Best-effort guesses for the user's own email addresses, derived
@@ -348,4 +387,11 @@ final class CalendarStore: ObservableObject {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+// MARK: - CalendarEventSource conformance
+
+extension CalendarStore: CalendarEventSource {
+    var currentEventsPublisher: Published<[CalendarEvent]>.Publisher { $currentEvents }
+    var upcomingEventsPublisher: Published<[CalendarEvent]>.Publisher { $upcomingEvents }
 }
