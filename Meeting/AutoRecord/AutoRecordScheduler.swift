@@ -88,7 +88,7 @@ final class AutoRecordScheduler: ObservableObject {
         let prefs = prefsProvider()
         let now = clock.now()
         let pool = (latestCurrent + latestUpcoming).sorted { $0.startDate < $1.startDate }
-        let next = pool.first { evt in
+        let eligible = pool.filter { evt in
             AutoRecordEligibility.eligible(
                 event: evt,
                 prefs: prefs,
@@ -96,7 +96,7 @@ final class AutoRecordScheduler: ObservableObject {
                 now: now
             )
         }
-        guard let next else {
+        guard let next = eligible.first else {
             disarm()
             return
         }
@@ -111,10 +111,24 @@ final class AutoRecordScheduler: ObservableObject {
            abs(currentFireAt.timeIntervalSince(next.startDate)) <= Self.rearmTolerance {
             return
         }
-        // Already counting down on this event — don't restart.
+        // Already counting down on this event — don't restart unless the
+        // start time has drifted by more than rearmTolerance.
         if case let .countingDown(currentEvt, _, _) = state,
-           currentEvt.eventIdentifier == next.eventIdentifier {
+           currentEvt.eventIdentifier == next.eventIdentifier,
+           abs(currentEvt.startDate.timeIntervalSince(next.startDate)) <= Self.rearmTolerance {
             return
+        }
+        // Suppress any OTHER eligible events whose startDate is within the
+        // arm horizon — the single-track scheduler can only arm one, and the
+        // losers would otherwise silently re-attempt (blocked by
+        // .alreadyRecording with no toast). Emit the toast now while the
+        // user still has context.
+        for other in eligible.dropFirst() {
+            let dt = other.startDate.timeIntervalSince(now)
+            if dt <= Self.armHorizon, !suppressedThisSession.contains(other.eventIdentifier) {
+                suppressedThisSession.insert(other.eventIdentifier)
+                skip(other, reason: .overlappingFireLostMatch)
+            }
         }
         arm(event: next)
     }

@@ -101,18 +101,32 @@ final class ToastPresenter: ObservableObject {
     }
 
     /// Shown when auto-record is blocked because a required TCC permission
-    /// has not been granted.
-    func showAutoRecordMissingPermission(eventTitle: String, permissionName: String) {
+    /// has not been granted. `openSettingsURL` should be an
+    /// `x-apple.systempreferences:` URL for the relevant privacy pane; when
+    /// provided an "Open" button appears and opens System Settings directly.
+    func showAutoRecordMissingPermission(
+        eventTitle: String,
+        permissionName: String,
+        openSettingsURL: URL? = nil
+    ) {
         let info = ToastInfo(
             headline: "Auto-record needs \(permissionName)",
             title: eventTitle,
             subtitle: "Open Settings to grant access",
-            openTarget: nil,
+            openTarget: openSettingsURL,
             folder: nil
         )
         present(view: ToastView(
             info: info,
-            onOpen: { [weak self] in self?.dismiss() },
+            onOpen: { [weak self] in
+                if let url = openSettingsURL {
+                    // x-apple.systempreferences: URLs must be opened via
+                    // NSWorkspace.open — activateFileViewerSelecting doesn't
+                    // handle non-file URLs.
+                    NSWorkspace.shared.open(url)
+                }
+                self?.dismiss()
+            },
             onDismiss: { [weak self] in self?.dismiss() }
         ))
         scheduleAutoDismiss(after: 6)

@@ -141,13 +141,19 @@ final class AppState: ObservableObject {
                     toastRef.showAutoRecordCancelled(eventTitle: event.title)
                 case .missingScreenRecordingPermission:
                     toastRef.showAutoRecordMissingPermission(
-                        eventTitle: event.title, permissionName: "Screen Recording")
+                        eventTitle: event.title,
+                        permissionName: "Screen Recording",
+                        openSettingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"))
                 case .missingMicPermission:
                     toastRef.showAutoRecordMissingPermission(
-                        eventTitle: event.title, permissionName: "Microphone")
+                        eventTitle: event.title,
+                        permissionName: "Microphone",
+                        openSettingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"))
                 case .missingProcessAudioPermission:
                     toastRef.showAutoRecordMissingPermission(
-                        eventTitle: event.title, permissionName: "Audio Capture")
+                        eventTitle: event.title,
+                        permissionName: "Audio Capture",
+                        openSettingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"))
                 case .sourceUnavailableAndSkipFallback,
                      .overlappingFireLostMatch,
                      .eventStartedWhileMacAsleep:
@@ -229,6 +235,16 @@ final class AppState: ObservableObject {
         .dropFirst()
         .sink { [weak self] _, _, _, _ in self?.autoRecord.reevaluate() }
         .store(in: &cancellables)
+
+        // Re-evaluate the scheduler when calendar authorization changes —
+        // e.g. the user revokes access mid-session. CalendarStore.refresh()
+        // already clears the event arrays, but the EKEventStoreChanged
+        // notification may not fire on revocation; this sink guarantees the
+        // scheduler reacts and clears its armed state.
+        calendar.$authorization
+            .dropFirst()
+            .sink { [weak self] _ in self?.autoRecord.reevaluate() }
+            .store(in: &cancellables)
 
         // Keep the library pointed at whatever folder Settings is showing
         // — when the user picks a new meetings root the watcher swaps and
