@@ -52,7 +52,7 @@ struct PopoverIdleView: View {
                 WindowPicker(model: picker)
             }
 
-            SpeakerCountChip(selection: $prefs.expectedSpeakerCount)
+            MicInputChip()
 
             GlassButton(style: .accent, action: startRecording) {
                 HStack(spacing: 6) {
@@ -611,33 +611,40 @@ struct PopoverHeader<Trailing: View>: View {
 }
 
 // =============================================================================
-// MARK: - Speaker count chip
+// MARK: - Mic input chip
 // =============================================================================
 
-struct SpeakerCountChip: View {
-    @Binding var selection: ExpectedSpeakers
+/// Quick picker for which microphone the next recording captures. Binds to
+/// `AppPreferences.micDeviceUID`; `nil` follows the system default. The
+/// device list is enumerated lazily on appear and refreshed every time the
+/// popover opens, which is the natural moment to pick up newly-plugged
+/// audio gear without a manual refresh affordance.
+struct MicInputChip: View {
+    @ObservedObject private var prefs = AppPreferences.shared
+    @State private var devices: [AudioInputDevice] = []
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "person.2.fill")
-                .font(.system(size: 11))
+        HStack(spacing: 10) {
+            Image(systemName: "mic.fill")
+                .font(.system(size: 12))
                 .foregroundStyle(Color.textDim)
-            Text("Expected speakers")
-                .font(.system(size: 11))
-                .foregroundStyle(Color.textDim)
-            Spacer()
-            Picker("", selection: $selection) {
-                ForEach(ExpectedSpeakers.allCases, id: \.self) { option in
-                    Text(option.displayName).tag(option)
+                .frame(width: 14)
+            Picker("", selection: $prefs.micDeviceUID) {
+                Text("Follow system default").tag(String?.none)
+                if !devices.isEmpty {
+                    Divider()
+                    ForEach(devices) { device in
+                        Text(deviceLabel(device)).tag(String?.some(device.uid))
+                    }
                 }
             }
             .pickerStyle(.menu)
             .labelsHidden()
-            .fixedSize()
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .background {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(.regularMaterial)
@@ -651,6 +658,13 @@ struct SpeakerCountChip: View {
                         )
                 }
         }
+        .task {
+            devices = AudioInputDevices.enumerate()
+        }
+    }
+
+    private func deviceLabel(_ device: AudioInputDevice) -> String {
+        device.isDefault ? "\(device.name) (system default)" : device.name
     }
 }
 

@@ -338,7 +338,7 @@ private struct RecordingTab: View {
         VStack(alignment: .leading, spacing: 22) {
             DetailHeader(
                 title: "Recording",
-                subtitle: "Pick which microphone to capture and tune diarization defaults."
+                subtitle: "Pick which microphone to capture."
             )
 
             SettingsSection(label: "Microphone") {
@@ -357,19 +357,6 @@ private struct RecordingTab: View {
                         tone: .info
                     )
                 }
-            }
-
-            SettingsSection(label: "Diarization") {
-                MenuRow(
-                    title: "Default expected speakers",
-                    description: "Sets the count Pyannote uses unless overridden in the popover. \"Auto\" lets the model decide.",
-                    selection: Binding(
-                        get: { prefs.expectedSpeakerCount },
-                        set: { prefs.expectedSpeakerCount = $0 }
-                    ),
-                    options: ExpectedSpeakers.allCases,
-                    label: \.displayName
-                )
             }
 
             IdentityMatchingSection()

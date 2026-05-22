@@ -8,13 +8,10 @@ import AppKit
 final class AppPreferences: ObservableObject {
     static let shared = AppPreferences()
 
-    @Published var expectedSpeakerCount: ExpectedSpeakers {
-        didSet { UserDefaults.standard.set(expectedSpeakerCount.storageValue, forKey: Keys.expectedSpeakers) }
-    }
-
-    /// Stable device UID picked in Settings → Recording. `nil` = follow the
-    /// system default input device. Persisted as String?; `MicRecorder`
-    /// applies it when starting the audio engine.
+    /// Stable device UID picked in Settings → Recording or the menu-bar
+    /// popover chip. `nil` = follow the system default input device.
+    /// Persisted as String?; `MicRecorder` applies it when starting the
+    /// audio engine.
     @Published var micDeviceUID: String? {
         didSet { UserDefaults.standard.set(micDeviceUID, forKey: Keys.micDeviceUID) }
     }
@@ -182,8 +179,6 @@ final class AppPreferences: ObservableObject {
     }
 
     private init() {
-        let raw = UserDefaults.standard.object(forKey: Keys.expectedSpeakers) as? Int
-        self.expectedSpeakerCount = ExpectedSpeakers(storageValue: raw)
         self.micDeviceUID = UserDefaults.standard.string(forKey: Keys.micDeviceUID)
         self.modelVariant = ModelVariant(
             rawValue: UserDefaults.standard.string(forKey: Keys.modelVariant) ?? ""
@@ -283,7 +278,6 @@ final class AppPreferences: ObservableObject {
     }
 
     private enum Keys {
-        static let expectedSpeakers = "dev.fluke.meeting.expectedSpeakers"
         static let micDeviceUID = "dev.fluke.meeting.micDeviceUID"
         static let modelVariant = "dev.fluke.meeting.modelVariant"
         static let transcriptionLanguage = "dev.fluke.meeting.transcriptionLanguage"
@@ -335,49 +329,6 @@ struct GroupMember: Codable, Hashable, Sendable, Identifiable {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
-}
-
-// MARK: - Expected speaker count
-
-/// User's expectation for how many participants will be speaking in the meeting
-/// audio. Drives PyannoteDiarizationOptions.numberOfSpeakers.
-enum ExpectedSpeakers: Hashable, CaseIterable {
-    case auto
-    case exact(Int)
-
-    static let allCases: [ExpectedSpeakers] = [
-        .auto, .exact(1), .exact(2), .exact(3), .exact(4), .exact(5), .exact(6)
-    ]
-
-    var pyannoteValue: Int? {
-        switch self {
-        case .auto: nil
-        case .exact(let n): n
-        }
-    }
-
-    var displayName: String {
-        switch self {
-        case .auto: "Auto detect"
-        case .exact(1): "Solo (1 speaker)"
-        case .exact(let n): "\(n) speakers"
-        }
-    }
-
-    var storageValue: Int {
-        switch self {
-        case .auto: -1
-        case .exact(let n): n
-        }
-    }
-
-    init(storageValue: Int?) {
-        guard let raw = storageValue, raw > 0 else {
-            self = .auto
-            return
-        }
-        self = .exact(raw)
-    }
 }
 
 // MARK: - Whisper model variant
