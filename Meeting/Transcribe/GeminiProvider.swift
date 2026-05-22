@@ -427,13 +427,59 @@ actor GeminiProvider: TranscriptionProvider {
         let mimeType: String
     }
 
+    /// Internal signal that uploadFileOnce hit a transient condition (a
+    /// retryable URLError or a 5xx from either phase). Triggers the outer
+    /// retry to re-initiate the *whole* resumable session — bytes against
+    /// a used upload URL gets HTTP 400 "Upload has already been terminated"
+    /// because Gemini's resumable URL becomes single-use once finalize is
+    /// reached server-side (which can happen even when the client sees a
+    /// timeout or 5xx, if the response was lost after finalize).
+    private struct UploadTransient: Error { let summary: String }
+
     /// Resumable upload (2 round trips): metadata POST → bytes upload.
     /// Reports 0...1 progress for the bytes phase. `mimeOverride` forces
     /// a specific MIME (used for JSONL batch input — `mimeType(for:)`
     /// would otherwise fall through to `application/octet-stream`).
+    ///
+    /// Retries at this outer level — never against the same upload URL.
     private nonisolated func uploadFile(
         at audioURL: URL,
         mimeOverride: String? = nil,
+        onProgress: @Sendable (Double) -> Void
+    ) async throws -> UploadedFile {
+        let maxAttempts = 4
+        var attempt = 0
+        var lastSummary = ""
+        while true {
+            attempt += 1
+            do {
+                return try await uploadFileOnce(
+                    at: audioURL,
+                    mimeOverride: mimeOverride,
+                    onProgress: onProgress
+                )
+            } catch let transient as UploadTransient {
+                lastSummary = transient.summary
+                if attempt < maxAttempts {
+                    let delay = retryDelay(attempt: attempt)
+                    NSLog("[Meeting/Transcribe] Gemini upload: %@, retrying in %.1fs (attempt %d/%d)",
+                          transient.summary, delay, attempt, maxAttempts)
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    continue
+                }
+                throw TranscriptionError.providerFailed(name, underlying: GeminiError.uploadFailed(lastSummary))
+            }
+        }
+    }
+
+    /// Single end-to-end attempt: initiate session → push bytes → decode.
+    /// Throws `UploadTransient` for retryable failures (network blip / 5xx)
+    /// so the caller can restart from `start` with a fresh URL. Throws
+    /// `GeminiError.uploadFailed` for fatal failures (4xx, bad response
+    /// shape) that won't improve with retry.
+    private nonisolated func uploadFileOnce(
+        at audioURL: URL,
+        mimeOverride: String?,
         onProgress: @Sendable (Double) -> Void
     ) async throws -> UploadedFile {
         let fileSize = try (FileManager.default.attributesOfItem(atPath: audioURL.path(percentEncoded: false))[.size] as? Int) ?? 0
@@ -451,11 +497,21 @@ actor GeminiProvider: TranscriptionProvider {
         startReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
         startReq.httpBody = #"{"file":{"display_name":"meeting"}}"#.data(using: .utf8)
 
-        let (startBody, startResponse) = try await sendWithRetry(label: "upload-start") {
-            try await urlSession.data(for: startReq)
+        let startBody: Data
+        let startResponse: URLResponse
+        do {
+            (startBody, startResponse) = try await urlSession.data(for: startReq)
+        } catch {
+            if isRetryableNetworkError(error) {
+                throw UploadTransient(summary: "start — network error: \(error.localizedDescription)")
+            }
+            throw error
         }
         guard let httpStart = startResponse as? HTTPURLResponse else {
             throw TranscriptionError.providerFailed(name, underlying: GeminiError.uploadFailed("no HTTP response on upload start"))
+        }
+        if shouldRetryStatus(httpStart.statusCode) {
+            throw UploadTransient(summary: "start — \(Self.explainGeminiError(status: httpStart.statusCode, body: startBody))")
         }
         guard httpStart.statusCode == 200 else {
             let summary = Self.explainGeminiError(status: httpStart.statusCode, body: startBody)
@@ -478,15 +534,25 @@ actor GeminiProvider: TranscriptionProvider {
         // We don't have streaming-progress callbacks via async/await, so
         // emit a single 0.5 mid-update before the call resolves.
         onProgress(0.0)
-        // Retrying byte upload is safe: URLSession.upload(fromFile:) opens
-        // the file fresh per attempt, no stream-consumption hazard.
-        let (data, byteResponse) = try await sendWithRetry(label: "upload-bytes") {
-            try await urlSession.upload(for: byteReq, fromFile: audioURL)
+        let data: Data
+        let byteResponse: URLResponse
+        do {
+            (data, byteResponse) = try await urlSession.upload(for: byteReq, fromFile: audioURL)
+        } catch {
+            if isRetryableNetworkError(error) {
+                throw UploadTransient(summary: "bytes — network error: \(error.localizedDescription)")
+            }
+            throw error
         }
         onProgress(1.0)
-        guard let httpBytes = byteResponse as? HTTPURLResponse, httpBytes.statusCode == 200 else {
-            let status = (byteResponse as? HTTPURLResponse)?.statusCode ?? -1
-            let summary = Self.explainGeminiError(status: status, body: data)
+        guard let httpBytes = byteResponse as? HTTPURLResponse else {
+            throw TranscriptionError.providerFailed(name, underlying: GeminiError.uploadFailed("bytes — no HTTP response"))
+        }
+        if shouldRetryStatus(httpBytes.statusCode) {
+            throw UploadTransient(summary: "bytes — \(Self.explainGeminiError(status: httpBytes.statusCode, body: data))")
+        }
+        guard httpBytes.statusCode == 200 else {
+            let summary = Self.explainGeminiError(status: httpBytes.statusCode, body: data)
             throw TranscriptionError.providerFailed(name, underlying: GeminiError.uploadFailed("bytes — \(summary)"))
         }
 
@@ -916,10 +982,15 @@ actor GeminiProvider: TranscriptionProvider {
         }
         onProgress?(prepEnd)
 
-        // (2) Upload every chunk from every stream in parallel. No cap —
-        // URLSession's per-host connection pool absorbs the burst, and
-        // Files API uploads aren't subject to the per-minute generateContent
-        // quota that drove the 8-cap on the sync path.
+        // (2) Upload every chunk from every stream with a rolling
+        // concurrency cap. The previous "no cap" approach overwhelmed the
+        // Files API on long meetings — bursting 30-60 simultaneous uploads
+        // to one host reliably tripped HTTP 503 (Service Unavailable),
+        // and even with the resumable-session retry fix the same overload
+        // burned through retries because all parallel attempts hit the
+        // same 503 wall. A cap of 6 keeps wall-clock fast (URLSession's
+        // HTTP/2 multiplexing means we're still pipelining) while staying
+        // under Gemini's overload threshold.
         let totalChunks = perStreamChunks.values.reduce(0) { $0 + $1.count }
         let aggregator = ChunkProgressAggregator(count: totalChunks) { fraction in
             onProgress?(prepEnd + fraction * (uploadEnd - prepEnd))
@@ -930,32 +1001,55 @@ actor GeminiProvider: TranscriptionProvider {
             let offset: TimeInterval
             let uploaded: UploadedFile
         }
+        struct PendingUpload: Sendable {
+            let streamIndex: Int
+            let chunkIndex: Int
+            let chunk: CloudAudioPrep.Chunk
+            let progressIndex: Int
+        }
+        var pending: [PendingUpload] = []
+        pending.reserveCapacity(totalChunks)
+        var nextProgressIdx = 0
+        for sIdx in perStreamChunks.keys.sorted() {
+            let chunks = perStreamChunks[sIdx] ?? []
+            for (cIdx, chunk) in chunks.enumerated() {
+                pending.append(PendingUpload(
+                    streamIndex: sIdx,
+                    chunkIndex: cIdx,
+                    chunk: chunk,
+                    progressIndex: nextProgressIdx
+                ))
+                nextProgressIdx += 1
+            }
+        }
+        let uploadConcurrency = min(6, pending.count)
         let allUploaded = try await withThrowingTaskGroup(of: UploadedTagged.self) { group in
-            var dispatched = 0
-            for sIdx in perStreamChunks.keys.sorted() {
-                let chunks = perStreamChunks[sIdx] ?? []
-                for (cIdx, chunk) in chunks.enumerated() {
-                    let progressIdx = dispatched
-                    dispatched += 1
-                    group.addTask { [self] in
-                        let uploaded = try await uploadFile(at: chunk.url) { f in
-                            aggregator.update(index: progressIdx, fraction: f * 0.5)
-                        }
-                        try await waitUntilActive(name: uploaded.name)
-                        aggregator.update(index: progressIdx, fraction: 1.0)
-                        return UploadedTagged(
-                            streamIndex: sIdx,
-                            chunkIndex: cIdx,
-                            offset: chunk.offset,
-                            uploaded: uploaded
-                        )
-                    }
+            var queue = pending
+            queue.reverse() // pop from the back so .removeLast() is O(1)
+            let runOne: @Sendable (PendingUpload) async throws -> UploadedTagged = { [self] p in
+                let uploaded = try await uploadFile(at: p.chunk.url) { f in
+                    aggregator.update(index: p.progressIndex, fraction: f * 0.5)
                 }
+                try await waitUntilActive(name: uploaded.name)
+                aggregator.update(index: p.progressIndex, fraction: 1.0)
+                return UploadedTagged(
+                    streamIndex: p.streamIndex,
+                    chunkIndex: p.chunkIndex,
+                    offset: p.chunk.offset,
+                    uploaded: uploaded
+                )
+            }
+            for _ in 0..<uploadConcurrency {
+                let p = queue.removeLast()
+                group.addTask { try await runOne(p) }
             }
             var collected: [UploadedTagged] = []
-            collected.reserveCapacity(dispatched)
+            collected.reserveCapacity(totalChunks)
             while let item = try await group.next() {
                 collected.append(item)
+                if let p = queue.popLast() {
+                    group.addTask { try await runOne(p) }
+                }
             }
             return collected
         }
