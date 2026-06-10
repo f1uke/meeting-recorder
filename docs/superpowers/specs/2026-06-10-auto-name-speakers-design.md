@@ -46,16 +46,18 @@ can always see and undo what the machine decided.
 
 ### 1. `SpeakerProfile` (`Meeting/Library/SpeakerMapFile.swift`)
 
-Add two Codable fields:
+Add one stored field plus a computed convenience:
 
-- `autoNamed: Bool` — true when the name was applied by the auto-map pass (not
-  by the user). Used to render the badge and gate the revert action.
 - `autoNamedConfidence: Int?` — the `confidencePercent` at the time of
-  auto-apply, shown in the badge (`✨ auto 92%`).
+  auto-apply, shown in the badge (`✨ auto 92%`). `nil` means the speaker was
+  not auto-named.
+- `autoNamed: Bool` (computed) — `autoNamedConfidence != nil`. Used to render the
+  badge and gate the revert action.
 
-Both default to `false` / `nil` so existing `speakers.json` files decode
-unchanged. A speaker the user renamed by hand keeps `autoNamed: false` and is
-never touched by the pass.
+Keeping the single persisted field **optional** means existing `speakers.json`
+files (which lack the key) decode unchanged via synthesized Codable — no custom
+decoder needed. A speaker the user renamed by hand has `autoNamedConfidence ==
+nil` and is never touched by the pass.
 
 ### 2. `AppPreferences` (`Meeting/App/AppPreferences.swift`)
 
