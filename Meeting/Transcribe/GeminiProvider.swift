@@ -204,17 +204,11 @@ actor GeminiProvider: TranscriptionProvider {
             // Seed the initial wave.
             while dispatched < min(maxConcurrent, chunks.count) {
                 let idx = dispatched
-                let chunk = chunks[idx]
                 group.addTask { [self] in
-                    let segs = try await transcribeOneChunk(
-                        audioURL: chunk.url,
-                        offset: chunk.offset,
-                        language: language,
-                        onProgress: { fraction in
-                            aggregator.update(index: idx, fraction: fraction)
-                        }
-                    )
-                    return (idx, segs)
+                    (idx, try await transcribeChunkOrPlaceholder(
+                        chunks: chunks, index: idx,
+                        language: language, aggregator: aggregator
+                    ))
                 }
                 dispatched += 1
             }
@@ -226,17 +220,11 @@ actor GeminiProvider: TranscriptionProvider {
                 results.append(result)
                 if dispatched < chunks.count {
                     let idx = dispatched
-                    let chunk = chunks[idx]
                     group.addTask { [self] in
-                        let segs = try await transcribeOneChunk(
-                            audioURL: chunk.url,
-                            offset: chunk.offset,
-                            language: language,
-                            onProgress: { fraction in
-                                aggregator.update(index: idx, fraction: fraction)
-                            }
-                        )
-                        return (idx, segs)
+                        (idx, try await transcribeChunkOrPlaceholder(
+                            chunks: chunks, index: idx,
+                            language: language, aggregator: aggregator
+                        ))
                     }
                     dispatched += 1
                 }
@@ -252,6 +240,44 @@ actor GeminiProvider: TranscriptionProvider {
     }
 
     // MARK: - Per-chunk pipeline
+
+    /// Run one chunk through the sync pipeline, substituting a visible
+    /// placeholder segment when the chunk soft-fails (MAX_TOKENS
+    /// truncation or a safety block) — mirrors the batch parsers so one
+    /// degenerate chunk (e.g. a repetition loop on a noisy 60 s slice)
+    /// can't kill the rest of a long transcript. Hard errors (network,
+    /// auth, cancellation) still propagate and fail the job.
+    private nonisolated func transcribeChunkOrPlaceholder(
+        chunks: [CloudAudioPrep.Chunk],
+        index: Int,
+        language: String?,
+        aggregator: ChunkProgressAggregator
+    ) async throws -> [CloudSegment] {
+        let chunk = chunks[index]
+        do {
+            return try await transcribeOneChunk(
+                audioURL: chunk.url,
+                offset: chunk.offset,
+                language: language,
+                onProgress: { fraction in
+                    aggregator.update(index: index, fraction: fraction)
+                }
+            )
+        } catch {
+            let chunkEnd = (index + 1 < chunks.count)
+                ? chunks[index + 1].offset
+                : chunk.offset + 60
+            guard let placeholder = Self.syncPlaceholder(
+                for: error, offset: chunk.offset, chunkEnd: chunkEnd
+            ) else {
+                throw error
+            }
+            NSLog("[Meeting/Transcribe] Gemini sync: chunk %d soft-failed (%@) — substituting placeholder %.1f…%.1fs",
+                  index, Self.softFailureReason(in: error) ?? "?", chunk.offset, chunkEnd)
+            aggregator.update(index: index, fraction: 1)
+            return [placeholder]
+        }
+    }
 
     /// Run the full upload → wait-active → generateContent pipeline for a
     /// single chunk. Reports its own 0...1 progress; the caller maps that
@@ -364,16 +390,40 @@ actor GeminiProvider: TranscriptionProvider {
         "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "LANGUAGE"
     ]
 
-    /// Extract the reason string if `error` is a `TranscriptionError.providerFailed`
-    /// wrapping `GeminiError.contentBlocked`. Returns nil otherwise, so callers
-    /// can re-throw anything that isn't a soft policy block.
-    private static func blockedReason(in error: any Error) -> String? {
+    /// Extract a reason string if `error` is a per-chunk soft failure we
+    /// can replace with a placeholder rather than fail the whole batch.
+    /// Covers safety/policy blocks (`contentBlocked`) and per-chunk output
+    /// truncation (`outputTruncated` = `finishReason: MAX_TOKENS`).
+    /// Returns nil for anything that isn't recoverable at the chunk level.
+    private static func softFailureReason(in error: any Error) -> String? {
         guard case TranscriptionError.providerFailed(_, let underlying) = error,
-              let geminiErr = underlying as? GeminiError,
-              case .contentBlocked(let reason) = geminiErr else {
+              let geminiErr = underlying as? GeminiError else {
             return nil
         }
-        return reason
+        switch geminiErr {
+        case .contentBlocked(let reason): return reason
+        case .outputTruncated: return "MAX_TOKENS"
+        default: return nil
+        }
+    }
+
+    /// If `error` is a per-chunk soft failure, build the placeholder
+    /// segment the sync fan-out substitutes for the chunk spanning
+    /// `offset..<chunkEnd` — same visible-marker shape the batch parsers
+    /// emit. Returns nil for hard errors (network, auth, cancellation)
+    /// so the caller re-throws them and the job genuinely fails.
+    static func syncPlaceholder(
+        for error: any Error,
+        offset: TimeInterval,
+        chunkEnd: TimeInterval
+    ) -> CloudSegment? {
+        guard let reason = softFailureReason(in: error) else { return nil }
+        return CloudSegment(
+            start: offset,
+            end: chunkEnd,
+            text: "[Gemini ข้ามท่อนนี้: \(reason)]",
+            language: nil
+        )
     }
 
     /// Decode Gemini's standard `{error: {code, message, status}}` envelope
@@ -609,7 +659,9 @@ actor GeminiProvider: TranscriptionProvider {
 
     // MARK: - generateContent
 
-    private struct CloudSegment: Sendable {
+    // Internal (not private) so unit tests can assert on placeholder
+    // substitution — see GeminiSyncSoftFailureTests.
+    struct CloudSegment: Sendable {
         let start: TimeInterval
         let end: TimeInterval
         let text: String
@@ -735,14 +787,12 @@ actor GeminiProvider: TranscriptionProvider {
         }
         let candidate = envelope.candidates?.first
         let finishReason = candidate?.finishReason
-        // MAX_TOKENS = the model ran out of output tokens mid-JSON. Surface
-        // it explicitly so the user knows to switch to a smaller meeting
-        // chunk or a model with more headroom — generic "decode failed" is
-        // misleading when the underlying issue is truncation.
+        // MAX_TOKENS = the model ran out of output tokens mid-JSON. Throw
+        // as a dedicated `.outputTruncated` so callers (batch parsers and
+        // the sync fan-out alike) can catch it and substitute a placeholder
+        // for THIS chunk while keeping the rest of the transcript.
         if finishReason == "MAX_TOKENS" {
-            throw TranscriptionError.providerFailed(name, underlying: GeminiError.generateFailed(
-                "Output truncated at maxOutputTokens. Try a shorter audio file, or switch to Gemini 2.5 Flash / Pro (more output headroom than Flash Lite)."
-            ))
+            throw TranscriptionError.providerFailed(name, underlying: GeminiError.outputTruncated)
         }
         // Gemini safety filters that block output entirely. Empty candidate
         // text + one of these reasons means "model wanted to respond but a
@@ -1434,11 +1484,26 @@ actor GeminiProvider: TranscriptionProvider {
                 NSLog("[Meeting/Transcribe] Gemini combined batch: line %d unparseable key, skipping", lineNumber)
                 continue
             }
+            let offset = chunks[parsed.chunkIndex].offset
+            let chunkEnd = (parsed.chunkIndex + 1 < chunks.count)
+                ? chunks[parsed.chunkIndex + 1].offset
+                : offset + 60
             if let err = obj["error"] as? [String: Any] {
+                // Per-line error — typically Google's server-side per-request
+                // "Deadline expired before operation could complete" timeout
+                // on a single chunk's inference. Substitute a visible
+                // placeholder and continue rather than killing the whole
+                // transcript, matching the safety-blocked path below.
                 let msg = (err["message"] as? String) ?? "unknown"
-                throw TranscriptionError.providerFailed(name, underlying: GeminiError.batchFailed(
-                    "stream \(parsed.streamIndex) chunk \(parsed.chunkIndex) failed: \(msg)"
+                NSLog("[Meeting/Transcribe] Gemini combined batch: stream %d chunk %d errored (%@) — substituting placeholder %.1f…%.1fs",
+                      parsed.streamIndex, parsed.chunkIndex, msg, offset, chunkEnd)
+                byStreamAndChunk[parsed.streamIndex, default: [:]][parsed.chunkIndex, default: []].append(CloudSegment(
+                    start: offset,
+                    end: chunkEnd,
+                    text: "[Gemini ข้ามท่อนนี้: \(msg)]",
+                    language: nil
                 ))
+                continue
             }
             guard let response = obj["response"] else {
                 NSLog("[Meeting/Transcribe] Gemini combined batch: line %d (s%d-c%d) has neither response nor error",
@@ -1446,20 +1511,16 @@ actor GeminiProvider: TranscriptionProvider {
                 continue
             }
             let envelopeData = try JSONSerialization.data(withJSONObject: response, options: [])
-            let offset = chunks[parsed.chunkIndex].offset
             let segs: [CloudSegment]
             do {
                 segs = try parseSegmentsFromEnvelope(envelopeData: envelopeData)
             } catch {
-                if let reason = Self.blockedReason(in: error) {
-                    let end = (parsed.chunkIndex + 1 < chunks.count)
-                        ? chunks[parsed.chunkIndex + 1].offset
-                        : offset + 60
-                    NSLog("[Meeting/Transcribe] Gemini combined batch: stream %d chunk %d blocked (%@) — substituting placeholder %.1f…%.1fs",
-                          parsed.streamIndex, parsed.chunkIndex, reason, offset, end)
+                if let reason = Self.softFailureReason(in: error) {
+                    NSLog("[Meeting/Transcribe] Gemini combined batch: stream %d chunk %d soft-failed (%@) — substituting placeholder %.1f…%.1fs",
+                          parsed.streamIndex, parsed.chunkIndex, reason, offset, chunkEnd)
                     let placeholder = CloudSegment(
                         start: offset,
-                        end: end,
+                        end: chunkEnd,
                         text: "[Gemini ข้ามท่อนนี้: \(reason)]",
                         language: nil
                     )
@@ -2027,13 +2088,25 @@ actor GeminiProvider: TranscriptionProvider {
                 NSLog("[Meeting/Transcribe] Gemini batch: line %d has no parseable key, skipping", lineNumber)
                 continue
             }
-            // Per-line error → fail the whole batch. We can't ship a
-            // partial transcript with gaps without misleading the user.
+            // Apply chunk offset so segments line up with the original audio.
+            let offset = chunks[idx].offset
+            let chunkEnd = (idx + 1 < chunks.count) ? chunks[idx + 1].offset : offset + 60
+            // Per-line error — typically Google's server-side per-request
+            // "Deadline expired before operation could complete" timeout on
+            // a single chunk's inference. Substitute a visible placeholder
+            // so the user can see which span Gemini dropped, rather than
+            // killing the whole batch over one bad chunk.
             if let err = obj["error"] as? [String: Any] {
                 let msg = (err["message"] as? String) ?? "unknown"
-                throw TranscriptionError.providerFailed(name, underlying: GeminiError.batchFailed(
-                    "chunk \(idx) failed: \(msg)"
+                NSLog("[Meeting/Transcribe] Gemini batch: chunk %d errored (%@) — substituting placeholder %.1f…%.1fs",
+                      idx, msg, offset, chunkEnd)
+                byIndex[idx, default: []].append(CloudSegment(
+                    start: offset,
+                    end: chunkEnd,
+                    text: "[Gemini ข้ามท่อนนี้: \(msg)]",
+                    language: nil
                 ))
+                continue
             }
             // Re-encode the `response` field as Data and reuse the same
             // envelope parser the sync path uses. Keeps the candidate /
@@ -2043,19 +2116,16 @@ actor GeminiProvider: TranscriptionProvider {
                 continue
             }
             let envelopeData = try JSONSerialization.data(withJSONObject: response, options: [])
-            // Apply chunk offset so segments line up with the original audio.
-            let offset = chunks[idx].offset
             let segs: [CloudSegment]
             do {
                 segs = try parseSegmentsFromEnvelope(envelopeData: envelopeData)
             } catch {
-                if let reason = Self.blockedReason(in: error) {
-                    let end = (idx + 1 < chunks.count) ? chunks[idx + 1].offset : offset + 60
-                    NSLog("[Meeting/Transcribe] Gemini batch: chunk %d blocked (%@) — substituting placeholder %.1f…%.1fs",
-                          idx, reason, offset, end)
+                if let reason = Self.softFailureReason(in: error) {
+                    NSLog("[Meeting/Transcribe] Gemini batch: chunk %d soft-failed (%@) — substituting placeholder %.1f…%.1fs",
+                          idx, reason, offset, chunkEnd)
                     byIndex[idx, default: []].append(CloudSegment(
                         start: offset,
-                        end: end,
+                        end: chunkEnd,
                         text: "[Gemini ข้ามท่อนนี้: \(reason)]",
                         language: nil
                     ))
@@ -2271,16 +2341,24 @@ private enum GeminiResumeError: Error {
     case batchGone(reason: String)
 }
 
-private enum GeminiError: LocalizedError {
+// Internal (not private) so unit tests can construct soft-failure cases —
+// see GeminiSyncSoftFailureTests.
+enum GeminiError: LocalizedError {
     case uploadFailed(String)
     case fileProcessingFailed
     case fileProcessingTimeout
     case generateFailed(String)
     case batchFailed(String)
     /// Gemini's safety / policy filter suppressed the output on a single
-    /// chunk. Batch parsers catch this and substitute a placeholder so the
-    /// rest of the transcript survives; the sync path lets it bubble up.
+    /// chunk. Both the batch parsers and the sync fan-out catch this and
+    /// substitute a placeholder so the rest of the transcript survives.
     case contentBlocked(reason: String)
+    /// Gemini's per-request output token budget was exhausted on a single
+    /// chunk (`finishReason: MAX_TOKENS`) — the response JSON is truncated
+    /// mid-stream. Treated like a content block on both paths: skip the
+    /// chunk with a visible placeholder. The description below only
+    /// surfaces if every path's soft-failure handling is bypassed.
+    case outputTruncated
 
     var errorDescription: String? {
         switch self {
@@ -2290,6 +2368,8 @@ private enum GeminiError: LocalizedError {
         case .generateFailed(let msg): "Gemini generateContent failed: \(msg)"
         case .batchFailed(let msg): "Gemini batch failed: \(msg)"
         case .contentBlocked(let reason): "Gemini blocked output (finishReason=\(reason))."
+        case .outputTruncated:
+            "Output truncated at maxOutputTokens. Try a shorter audio file, or switch to Gemini 2.5 Flash / Pro (more output headroom than Flash Lite)."
         }
     }
 }
