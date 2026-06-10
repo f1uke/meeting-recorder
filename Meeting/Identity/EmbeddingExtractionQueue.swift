@@ -15,6 +15,11 @@ actor EmbeddingExtractionQueue {
     /// drains. Drives MenuBarLabel's `.embedding` spinner state.
     var onActiveChanged: (@Sendable (Bool) -> Void)?
 
+    /// Notified with a meeting folder right after its `embeddings.json` is
+    /// successfully written — the first moment identity suggestions become
+    /// computable. Drives the auto-name pass.
+    var onMeetingEmbedded: (@Sendable (URL) -> Void)?
+
     private let embedder = SpeakerEmbedder()
     private var pending: [URL] = []
     private var processing: URL?
@@ -22,6 +27,10 @@ actor EmbeddingExtractionQueue {
 
     func setOnActiveChanged(_ callback: @escaping @Sendable (Bool) -> Void) {
         self.onActiveChanged = callback
+    }
+
+    func setOnMeetingEmbedded(_ callback: @escaping @Sendable (URL) -> Void) {
+        self.onMeetingEmbedded = callback
     }
 
     /// Idempotent — re-enqueueing a folder already pending/processing is a no-op.
@@ -54,6 +63,7 @@ actor EmbeddingExtractionQueue {
         }
         do {
             try await runExtraction(folder: folder)
+            onMeetingEmbedded?(folder)
         } catch {
             NSLog("[Meeting/Identity] extraction failed for %@: %@",
                   folder.lastPathComponent, String(describing: error))

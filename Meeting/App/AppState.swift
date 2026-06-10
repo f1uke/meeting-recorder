@@ -183,6 +183,18 @@ final class AppState: ObservableObject {
             }
         }
 
+        Task { [unowned self] in
+            await embeddingQueue.setOnMeetingEmbedded { folder in
+                Task { @MainActor [unowned self] in
+                    // Rescan so the just-written embeddings produce fresh
+                    // identitySuggestions on the record, then auto-apply the
+                    // high-confidence ones.
+                    self.library.rescan()
+                    self.library.autoNameSpeakers(folder: folder)
+                }
+            }
+        }
+
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.llmAvailability = await self.llm.availability()
