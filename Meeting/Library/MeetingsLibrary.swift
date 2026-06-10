@@ -370,6 +370,40 @@ final class MeetingsLibrary: ObservableObject {
     /// User confirmed `speaker_N == identity X`. Updates speakers.json
     /// (displayName + identityID) and folds the speaker's embedding into the
     /// global identity centroid via running-mean weighted by sampleSeconds.
+    /// True when a speaker's displayName is still a system default ("speaker_N",
+    /// "Speaker N", or "unknown") rather than a user- or auto-assigned name.
+    /// Mirrors the unmapped-speaker test in `loadRecord`.
+    nonisolated static func isDefaultSpeakerName(_ displayName: String) -> Bool {
+        let lower = displayName.lowercased()
+        let normalized = lower.replacingOccurrences(of: " ", with: "_")
+        return normalized.hasPrefix("speaker_") || lower == "unknown"
+    }
+
+    /// Pure selection: which suggestions should be auto-applied. Returns at most
+    /// one per speaker (the highest-scoring), keeping only those whose
+    /// `confidencePercent` ≥ `thresholdPercent` and whose speaker is still on a
+    /// default name with no identity yet. Empty when `enabled` is false.
+    nonisolated static func autoNameSelections(
+        suggestions: [IdentitySuggestion],
+        profiles: [SpeakerProfile],
+        enabled: Bool,
+        thresholdPercent: Int
+    ) -> [IdentitySuggestion] {
+        guard enabled else { return [] }
+        var bestBySpeaker: [SpeakerID: IdentitySuggestion] = [:]
+        for s in suggestions {
+            if let existing = bestBySpeaker[s.speakerID], existing.score >= s.score { continue }
+            bestBySpeaker[s.speakerID] = s
+        }
+        return bestBySpeaker.values
+            .filter { s in
+                guard s.confidencePercent >= thresholdPercent else { return false }
+                guard let p = profiles.first(where: { $0.id == s.speakerID }) else { return true }
+                return p.identityID == nil && isDefaultSpeakerName(p.displayName)
+            }
+            .sorted { $0.score > $1.score }
+    }
+
     func applyIdentitySuggestion(_ suggestion: IdentitySuggestion, meeting: MeetingRecord.ID) {
         guard let store = identityStore else { return }
         guard let m = meetings.first(where: { $0.id == meeting }) else { return }
