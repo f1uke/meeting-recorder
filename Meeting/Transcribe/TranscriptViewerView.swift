@@ -175,6 +175,7 @@ private struct TranscriptToolbar: View {
     @EnvironmentObject private var appState: AppState
     @AppStorage("dev.fluke.meeting.summaryDisclosureSeen") private var disclosureSeen = false
     @State private var showDisclosure = false
+    @StateObject private var videoExport = VideoExportModel()
 
     private var summaryEnabled: Bool {
         meeting.hasTranscript && appState.llmAvailability == .available
@@ -275,15 +276,18 @@ private struct TranscriptToolbar: View {
                 ? (meeting.summary == nil ? "Generate AI summary via Claude" : "Regenerate via Claude")
                 : "Install Claude Code: npm i -g @anthropic-ai/claude-code"
             )
-            ToolbarPill(icon: "square.and.arrow.down", label: "Export") {
-                exportSheetReExport()
+            ToolbarPill(icon: "square.and.arrow.down", label: "Export Video") {
+                videoExport.start(meeting)
             }
+            .disabled(!VideoExportModel.canExport(meeting) || videoExport.isRunning)
+            .help("Export one .mp4 with both audio tracks and subtitles")
             ToolbarPill(icon: "square.and.arrow.up", label: "Share") {
                 NSWorkspace.shared.activateFileViewerSelecting([meeting.folder])
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .videoExportSheet(videoExport)
         .alert("Send transcript to Claude?", isPresented: $showDisclosure) {
             Button("Cancel", role: .cancel) {}
             Button("Continue") {
@@ -298,20 +302,6 @@ private struct TranscriptToolbar: View {
         }
     }
 
-    /// Re-runs the existing TranscriptExporter against the current
-    /// transcript.json so .md and .srt are regenerated after edits.
-    private func exportSheetReExport() {
-        do {
-            let merged = try MergedTranscript.read(from: meeting.folder)
-            try TranscriptExporter.writeAll(merged, in: meeting.folder)
-            NSWorkspace.shared.activateFileViewerSelecting([
-                meeting.folder.appendingPathComponent("transcript.md")
-            ])
-        } catch {
-            NSLog("[Meeting/TranscriptViewer] re-export failed: %@",
-                  String(describing: error))
-        }
-    }
 }
 
 private struct ToolbarPill: View {

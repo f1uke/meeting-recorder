@@ -362,6 +362,7 @@ private struct DetailToolbar: View {
     @State private var showDisclosure = false
     @State private var showRetranscribeConfirm = false
     @State private var showDeleteConfirm = false
+    @StateObject private var videoExport = VideoExportModel()
 
     private var summaryEnabled: Bool {
         meeting.hasTranscript && appState.llmAvailability == .available && !isGeneratingSummary
@@ -448,6 +449,12 @@ private struct DetailToolbar: View {
                 NSWorkspace.shared.activateFileViewerSelecting([meeting.folder])
             }
 
+            ToolbarButton(icon: "film", label: "Export Video") {
+                videoExport.start(meeting)
+            }
+            .disabled(!VideoExportModel.canExport(meeting) || videoExport.isRunning)
+            .help("Export one .mp4 with both audio tracks and subtitles")
+
             ToolbarButton(icon: "trash", label: "Delete") {
                 showDeleteConfirm = true
             }
@@ -466,6 +473,7 @@ private struct DetailToolbar: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
         }
+        .videoExportSheet(videoExport)
         .alert("Send transcript to Claude?", isPresented: $showDisclosure) {
             Button("Cancel", role: .cancel) {}
             Button("Continue") {
