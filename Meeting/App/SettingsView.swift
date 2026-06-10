@@ -1605,6 +1605,22 @@ private struct StorageTab: View {
                 )
             }
 
+            SettingsSection(label: "Video retention") {
+                MenuRow(
+                    title: "Delete recorded video",
+                    description: "Video files are large. After this many days, a meeting's video.mov is moved to the Trash — audio, transcript, and everything else are always kept. Starred meetings are never touched.",
+                    selection: Binding(
+                        get: { prefs.videoRetention },
+                        set: {
+                            prefs.videoRetention = $0
+                            library.pruneExpiredVideos()
+                        }
+                    ),
+                    options: VideoRetention.allCases,
+                    label: \.displayName
+                )
+            }
+
             SettingsSection(label: "Disk usage") {
                 VStack(alignment: .leading, spacing: 8) {
                     GeometryReader { proxy in

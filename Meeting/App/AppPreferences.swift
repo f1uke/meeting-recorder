@@ -178,6 +178,15 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(autoRecordSourceFallback.rawValue, forKey: Keys.autoRecordSourceFallback) }
     }
 
+    /// How long the library keeps each meeting's `video.mov` before
+    /// auto-trashing it to reclaim disk space. Audio, transcript, marks,
+    /// and every other artifact are always kept — only the (large) video
+    /// file is removed. `.keepForever` (default) disables the sweep so
+    /// existing users see no change; starred meetings are always exempt.
+    @Published var videoRetention: VideoRetention {
+        didSet { UserDefaults.standard.set(videoRetention.rawValue, forKey: Keys.videoRetention) }
+    }
+
     private init() {
         self.micDeviceUID = UserDefaults.standard.string(forKey: Keys.micDeviceUID)
         self.modelVariant = ModelVariant(
@@ -242,6 +251,9 @@ final class AppPreferences: ObservableObject {
         self.autoRecordSourceFallback = AutoRecordSourceFallback(
             rawValue: UserDefaults.standard.string(forKey: Keys.autoRecordSourceFallback) ?? ""
         ) ?? .display
+        self.videoRetention = VideoRetention(
+            rawValue: UserDefaults.standard.string(forKey: Keys.videoRetention) ?? ""
+        ) ?? .keepForever
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -300,6 +312,7 @@ final class AppPreferences: ObservableObject {
         static let autoRecordCountdownSeconds = "dev.fluke.meeting.autoRecordCountdownSeconds"
         static let autoRecordEnabledCalendarIDs = "dev.fluke.meeting.autoRecordEnabledCalendarIDs"
         static let autoRecordSourceFallback = "dev.fluke.meeting.autoRecordSourceFallback"
+        static let videoRetention = "dev.fluke.meeting.videoRetention"
     }
 }
 
@@ -602,6 +615,46 @@ enum AutoRecordSourceFallback: String, CaseIterable, Sendable, Identifiable {
         switch self {
         case .display: return "Record the primary display instead"
         case .skip:    return "Skip the recording entirely"
+        }
+    }
+}
+
+// MARK: - Video retention
+
+/// How long the library keeps each meeting's `video.mov` before
+/// auto-trashing it to reclaim disk space. Only the video file is
+/// affected — audio (`mic.wav` / `output.wav`), transcript, marks, and
+/// every other artifact are always retained. Starred meetings are exempt
+/// from the sweep. Videos go to the Trash, not a hard delete, so they're
+/// recoverable.
+enum VideoRetention: String, CaseIterable, Identifiable, Sendable {
+    case keepForever
+    case days3
+    case days7
+    case days14
+    case days30
+
+    var id: String { rawValue }
+
+    /// Maximum video age in seconds, or `nil` when retention is off
+    /// (`.keepForever`) — in which case no sweep runs.
+    var maxAge: TimeInterval? {
+        switch self {
+        case .keepForever: return nil
+        case .days3:  return 3  * 86_400
+        case .days7:  return 7  * 86_400
+        case .days14: return 14 * 86_400
+        case .days30: return 30 * 86_400
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .keepForever: "Keep forever"
+        case .days3:  "After 3 days"
+        case .days7:  "After 7 days"
+        case .days14: "After 14 days"
+        case .days30: "After 30 days"
         }
     }
 }

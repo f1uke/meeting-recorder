@@ -132,8 +132,60 @@ final class MeetingsLibrary: ObservableObject {
                 if let sel = self.selection, !self.meetings.contains(where: { $0.id == sel }) {
                     self.selection = nil
                 }
+                self.pruneExpiredVideos(in: sorted)
             }
         }
+    }
+
+    /// Trash the `video.mov` of any meeting older than the user's
+    /// `videoRetention` window, keeping audio, transcript, and every other
+    /// artifact. Starred meetings are exempt. Videos go to the Trash (not a
+    /// hard delete) so they stay recoverable. Run at the end of every
+    /// rescan and on a retention-setting change — cheap (date + fileExists
+    /// checks) and self-correcting: once a video is trashed the next pass
+    /// skips it.
+    func pruneExpiredVideos() { pruneExpiredVideos(in: meetings) }
+
+    private func pruneExpiredVideos(in records: [MeetingRecord]) {
+        let expired = Self.expiredVideoFolders(
+            in: records,
+            retention: AppPreferences.shared.videoRetention,
+            now: Date()
+        )
+        guard !expired.isEmpty else { return }
+
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            for folder in expired {
+                let videoURL = folder.appendingPathComponent("video.mov")
+                guard fm.fileExists(atPath: videoURL.path(percentEncoded: false)) else { continue }
+                do {
+                    try fm.trashItem(at: videoURL, resultingItemURL: nil)
+                    NSLog("[Meeting/Library] video retention: trashed %@/video.mov",
+                          folder.lastPathComponent)
+                } catch {
+                    NSLog("[Meeting/Library] video retention: failed to trash %@/video.mov: %@",
+                          folder.lastPathComponent, String(describing: error))
+                }
+            }
+        }
+    }
+
+    /// Pure selection step behind `pruneExpiredVideos` — the folders whose
+    /// `video.mov` is eligible for trashing under `retention` as of `now`.
+    /// Returns an empty list for `.keepForever`. Excludes starred meetings.
+    /// Factored out (and `static`) so the date/starred logic is unit-testable
+    /// without touching disk — see VideoRetentionPruneTests.
+    nonisolated static func expiredVideoFolders(
+        in records: [MeetingRecord],
+        retention: VideoRetention,
+        now: Date
+    ) -> [URL] {
+        guard let maxAge = retention.maxAge else { return [] }
+        let cutoff = now.addingTimeInterval(-maxAge)
+        return records
+            .filter { !$0.starred && $0.recordedAt < cutoff }
+            .map(\.folder)
     }
 
     /// Reload a single meeting from disk and splice it into `meetings`.
