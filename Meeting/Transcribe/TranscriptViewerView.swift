@@ -1184,6 +1184,7 @@ private struct ContextPanel: View {
     let meeting: MeetingRecord
     @EnvironmentObject private var library: MeetingsLibrary
     @AppStorage("transcript.viewer.expand.context") private var isExpanded: Bool = true
+    @State private var showClearConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1191,7 +1192,12 @@ private struct ContextPanel: View {
                 label: "Captured · \(meeting.contextItems.count)",
                 isExpanded: $isExpanded
             ) {
-                EmptyView()
+                if !meeting.contextItems.isEmpty {
+                    Button("Clear all") { showClearConfirm = true }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.textDim)
+                }
             }
 
             if isExpanded {
@@ -1216,6 +1222,15 @@ private struct ContextPanel: View {
         .padding(12)
         .background {
             GlassCard(radius: 12) { Color.clear }
+        }
+        .alert("Delete all \(meeting.contextItems.count) captured items?",
+               isPresented: $showClearConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete All", role: .destructive) {
+                library.deleteAllContextItems(meeting: meeting.id)
+            }
+        } message: {
+            Text("This permanently removes every captured clipboard item, link, and image for this meeting. It can't be undone.")
         }
     }
 }

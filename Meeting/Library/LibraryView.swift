@@ -900,6 +900,7 @@ private struct ActionItemRow: View {
 struct ContextItemsSection: View {
     let meeting: MeetingRecord
     @EnvironmentObject private var library: MeetingsLibrary
+    @State private var showClearConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -909,6 +910,12 @@ struct ContextItemsSection: View {
                     .foregroundStyle(Color.textDim)
                 SectionLabel(text: "Captured · \(meeting.contextItems.count)")
                 Spacer()
+                if !meeting.contextItems.isEmpty {
+                    Button("Clear all") { showClearConfirm = true }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.textDim)
+                }
             }
             VStack(spacing: 4) {
                 ForEach(meeting.contextItems) { item in
@@ -925,6 +932,15 @@ struct ContextItemsSection: View {
                     )
                 }
             }
+        }
+        .alert("Delete all \(meeting.contextItems.count) captured items?",
+               isPresented: $showClearConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete All", role: .destructive) {
+                library.deleteAllContextItems(meeting: meeting.id)
+            }
+        } message: {
+            Text("This permanently removes every captured clipboard item, link, and image for this meeting. It can't be undone.")
         }
     }
 

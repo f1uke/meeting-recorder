@@ -258,6 +258,31 @@ final class MeetingsLibrary: ObservableObject {
         refreshMeeting(folder: meeting.folder)
     }
 
+    /// Remove every captured context item in one shot — the bulk version
+    /// of `deleteContextItem`. Trashes each backing image file so we don't
+    /// leave orphans on disk, then writes an empty context.json. Backs the
+    /// "Clear all" affordance on the Captured card so the user doesn't have
+    /// to prune copies one at a time.
+    func deleteAllContextItems(meeting id: MeetingRecord.ID) {
+        guard let meeting = meetings.first(where: { $0.id == id }) else { return }
+        guard !meeting.contextItems.isEmpty else { return }
+
+        for item in meeting.contextItems where item.kind == .image {
+            guard let filename = item.imageFilename else { continue }
+            let imageURL = ContextCaptureFile.imagesFolder(in: meeting.folder)
+                .appendingPathComponent(filename)
+            try? FileManager.default.removeItem(at: imageURL)
+        }
+
+        do {
+            try ContextCaptureFile(items: []).write(to: meeting.folder)
+        } catch {
+            NSLog("[Meeting/Library] context.json clear-all rewrite failed: %@",
+                  String(describing: error))
+        }
+        refreshMeeting(folder: meeting.folder)
+    }
+
     /// Move a meeting's folder to the Trash and drop its override entry.
     /// Falls back to a hard delete if Trash isn't available (e.g. on a
     /// volume that doesn't support it). The folder-rename watcher will
