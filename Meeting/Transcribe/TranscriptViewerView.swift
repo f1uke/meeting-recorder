@@ -702,6 +702,13 @@ private struct SpeakersPanel: View {
                             onReject: { s in library.rejectIdentitySuggestion(s, meeting: meeting.id) }
                         )
                         .padding(.leading, 32)
+                    } else if let profile = meeting.speakerProfiles.first(where: { $0.id == speaker.id }),
+                              let confidence = profile.autoNamedConfidence {
+                        AutoNamedBadge(
+                            confidence: confidence,
+                            onRevert: { library.revertAutoName(speakerID: speaker.id, meeting: meeting.id) }
+                        )
+                        .padding(.leading, 32)
                     }
                 }
             }
@@ -2016,6 +2023,27 @@ private struct IdentitySuggestionChip: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.brandAccent.opacity(0.08))
         )
+    }
+}
+
+/// Shown under a speaker whose name was filled in automatically by the
+/// auto-name pass. Communicates "this was a guess, here's how confident, undo it".
+private struct AutoNamedBadge: View {
+    let confidence: Int
+    let onRevert: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("✨ auto · \(confidence)%")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.textDim)
+            Button(action: onRevert) {
+                Text("Revert")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.brandAccent)
+        }
     }
 }
 
