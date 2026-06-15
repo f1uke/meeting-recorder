@@ -51,15 +51,17 @@ private struct LibraryList: View {
                 ListToolbar()
                 ScrollView(showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 4, pinnedViews: []) {
-                        ForEach(grouped, id: \.0) { (group, items) in
-                            Text(group.uppercased())
-                                .font(.sectionLabel)
-                                .kerning(0.8)
-                                .foregroundStyle(Color.textDim)
-                                .padding(.top, 12)
-                                .padding(.horizontal, 10)
-                                .padding(.bottom, 4)
-                            ForEach(items) { meeting in
+                        ForEach(rows) { row in
+                            switch row {
+                            case let .header(title):
+                                Text(title.uppercased())
+                                    .font(.sectionLabel)
+                                    .kerning(0.8)
+                                    .foregroundStyle(Color.textDim)
+                                    .padding(.top, 12)
+                                    .padding(.horizontal, 10)
+                                    .padding(.bottom, 4)
+                            case let .meeting(meeting):
                                 MeetingRow(
                                     meeting: meeting,
                                     isSelected: library.selection == meeting.id
@@ -79,9 +81,45 @@ private struct LibraryList: View {
         }
     }
 
-    private var grouped: [(String, [MeetingRecord])] {
+    /// Flat, globally-stable row list driving the LazyVStack. Headers and
+    /// meeting rows share a single `ForEach` so every meeting row keeps a
+    /// stable identity ("meeting:<id>") regardless of which date-group it
+    /// currently falls in.
+    ///
+    /// The previous design nested `ForEach(items)` inside `ForEach(grouped)`,
+    /// which made each row's SwiftUI identity hierarchical (group-string +
+    /// meeting.id). When a meeting crossed a day boundary while the Library
+    /// window stayed open (e.g. Today → This week after midnight + a rescan),
+    /// its identity changed and the LazyVStack recycled the slot — a
+    /// previously-selected row kept its blue highlight, so two rows looked
+    /// selected at once. Flattening keeps identity stable across groups.
+    private var rows: [LibraryRowItem] {
+        LibraryRowBuilder.rows(for: library.visibleMeetings, now: Date())
+    }
+}
+
+/// One element of the flattened Library list — either a date-group header or
+/// a meeting row. `id` is globally unique and independent of group membership
+/// so a meeting row's SwiftUI identity is stable as it migrates between
+/// date-groups over time.
+enum LibraryRowItem: Identifiable, Equatable {
+    case header(String)
+    case meeting(MeetingRecord)
+
+    var id: String {
+        switch self {
+        case let .header(title): return "header:\(title)"
+        case let .meeting(meeting): return "meeting:\(meeting.id)"
+        }
+    }
+}
+
+/// Pure bucketing logic behind `LibraryList.rows`, factored out and
+/// `now`-injected so the Today / Yesterday / This week / Earlier grouping is
+/// unit-testable without a view or the system clock. See LibraryRowBuilderTests.
+enum LibraryRowBuilder {
+    static func rows(for meetings: [MeetingRecord], now: Date) -> [LibraryRowItem] {
         let cal = Calendar.current
-        let now = Date()
         let startOfToday = cal.startOfDay(for: now)
         let startOfYesterday = cal.date(byAdding: .day, value: -1, to: startOfToday)!
         let startOfWeek = cal.date(byAdding: .day, value: -7, to: startOfToday)!
@@ -91,19 +129,24 @@ private struct LibraryList: View {
         var thisWeek: [MeetingRecord] = []
         var earlier: [MeetingRecord] = []
 
-        for m in library.visibleMeetings {
+        for m in meetings {
             if m.recordedAt >= startOfToday { today.append(m) }
             else if m.recordedAt >= startOfYesterday { yesterday.append(m) }
             else if m.recordedAt >= startOfWeek { thisWeek.append(m) }
             else { earlier.append(m) }
         }
 
-        var groups: [(String, [MeetingRecord])] = []
-        if !today.isEmpty { groups.append(("Today", today)) }
-        if !yesterday.isEmpty { groups.append(("Yesterday", yesterday)) }
-        if !thisWeek.isEmpty { groups.append(("This week", thisWeek)) }
-        if !earlier.isEmpty { groups.append(("Earlier", earlier)) }
-        return groups
+        var rows: [LibraryRowItem] = []
+        func append(_ title: String, _ bucket: [MeetingRecord]) {
+            guard !bucket.isEmpty else { return }
+            rows.append(.header(title))
+            rows.append(contentsOf: bucket.map(LibraryRowItem.meeting))
+        }
+        append("Today", today)
+        append("Yesterday", yesterday)
+        append("This week", thisWeek)
+        append("Earlier", earlier)
+        return rows
     }
 }
 
