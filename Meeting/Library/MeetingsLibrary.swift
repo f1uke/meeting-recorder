@@ -133,6 +133,10 @@ final class MeetingsLibrary: ObservableObject {
                     self.selection = nil
                 }
                 self.pruneExpiredVideos(in: sorted)
+                // One-time pass to auto-name the pre-fix historical library now
+                // that suggestions are freshly computed. Self-guards so it runs
+                // at most once ever (and no-ops on every later rescan).
+                self.backfillAutoNameIfNeeded()
             }
         }
     }
@@ -464,6 +468,13 @@ final class MeetingsLibrary: ObservableObject {
     func autoNameSpeakers(folder: URL) {
         let prefs = AppPreferences.shared
         guard prefs.autoNameSpeakersEnabled else { return }
+        // Recompute this folder's `identitySuggestions` synchronously before
+        // reading them. The caller's `rescan()` is async (Task.detached), so on
+        // its own it has not yet repopulated suggestions by the time we get
+        // here — `refreshMeeting` reloads just this one folder on the MainActor
+        // via `loadRecord`, which computes suggestions inline. Without this the
+        // auto-name pass read empty suggestions and silently did nothing.
+        refreshMeeting(folder: folder)
         guard let m = meetings.first(where: { $0.folder == folder }) else { return }
         let thresholdPercent = Int(prefs.autoNameThreshold * 100)
         let selections = Self.autoNameSelections(
@@ -472,9 +483,58 @@ final class MeetingsLibrary: ObservableObject {
             enabled: true,
             thresholdPercent: thresholdPercent
         )
-        guard !selections.isEmpty else { return }
+        applyAutoNameSelections(selections, meeting: m.id)
+    }
+
+    /// Auto-apply high-confidence names across every meeting currently loaded,
+    /// reusing the `identitySuggestions` the last rescan already computed (no
+    /// per-folder reload). Idempotent — `autoNameSelections` skips speakers
+    /// already named or below threshold. Used by the one-time historical
+    /// backfill; new meetings go through `autoNameSpeakers(folder:)` instead.
+    func autoNameAllLoadedMeetings() {
+        let prefs = AppPreferences.shared
+        guard prefs.autoNameSpeakersEnabled else { return }
+        let thresholdPercent = Int(prefs.autoNameThreshold * 100)
+        // Snapshot (meeting, selections) before applying — applying mutates
+        // `meetings`, but the per-meeting selections are value types so the
+        // snapshot stays valid through the loop.
+        let work: [(MeetingRecord.ID, [IdentitySuggestion])] = meetings.compactMap { m in
+            let selections = Self.autoNameSelections(
+                suggestions: m.identitySuggestions,
+                profiles: m.speakerProfiles,
+                enabled: true,
+                thresholdPercent: thresholdPercent
+            )
+            return selections.isEmpty ? nil : (m.id, selections)
+        }
+        for (meetingID, selections) in work {
+            applyAutoNameSelections(selections, meeting: meetingID)
+        }
+    }
+
+    /// One-time historical backfill. The auto-name feature shipped with a race
+    /// (the embedding-completion hook read suggestions before the async rescan
+    /// populated them), so no meeting recorded before the fix was ever
+    /// auto-named. This runs the pass once across the existing library, gated by
+    /// a persisted flag, and retries on later rescans until the data it needs
+    /// (loaded meetings + at least one saved identity) is actually available.
+    func backfillAutoNameIfNeeded() {
+        let key = "dev.fluke.meeting.didBackfillAutoNameV1"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        guard AppPreferences.shared.autoNameSpeakersEnabled else { return }
+        // Wait for the inputs the pass depends on; without these a rescan that
+        // landed before the identity store / scan finished would burn the flag
+        // on a no-op.
+        guard let store = identityStore, !store.identities.isEmpty, !meetings.isEmpty
+        else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        autoNameAllLoadedMeetings()
+    }
+
+    private func applyAutoNameSelections(_ selections: [IdentitySuggestion],
+                                         meeting: MeetingRecord.ID) {
         for suggestion in selections {
-            applyIdentitySuggestion(suggestion, meeting: m.id,
+            applyIdentitySuggestion(suggestion, meeting: meeting,
                                     autoConfidence: suggestion.confidencePercent)
         }
     }
