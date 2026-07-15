@@ -147,6 +147,20 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(identityMinSuggestScore, forKey: Keys.identityMinSuggestScore) }
     }
 
+    /// Master toggle for auto-naming high-confidence speakers. ON by default.
+    /// Has effect only while `identitySuggestionsEnabled` is also on (the matcher
+    /// must run to produce suggestions to auto-apply).
+    @Published var autoNameSpeakersEnabled: Bool {
+        didSet { UserDefaults.standard.set(autoNameSpeakersEnabled, forKey: Keys.autoNameSpeakersEnabled) }
+    }
+
+    /// A speaker is auto-named when its top suggestion's `confidencePercent`
+    /// is ≥ `Int(autoNameThreshold * 100)`. Default 0.80 (80%). Settings exposes
+    /// 0.60 … 0.95 in 0.05 steps.
+    @Published var autoNameThreshold: Double {
+        didSet { UserDefaults.standard.set(autoNameThreshold, forKey: Keys.autoNameThreshold) }
+    }
+
     /// Master toggle for the auto-record feature. Off by default — users
     /// have to opt in. When off, the scheduler stays idle even if other
     /// settings are populated.
@@ -239,6 +253,9 @@ final class AppPreferences: ObservableObject {
         self.identitySuggestionsEnabled = (UserDefaults.standard.object(forKey: Keys.identitySuggestionsEnabled) as? Bool) ?? true
         let storedMin = UserDefaults.standard.object(forKey: Keys.identityMinSuggestScore) as? Double
         self.identityMinSuggestScore = storedMin ?? 0.45
+        self.autoNameSpeakersEnabled = (UserDefaults.standard.object(forKey: Keys.autoNameSpeakersEnabled) as? Bool) ?? true
+        let storedAutoThreshold = UserDefaults.standard.object(forKey: Keys.autoNameThreshold) as? Double
+        self.autoNameThreshold = storedAutoThreshold ?? 0.80
         self.autoRecordEnabled = UserDefaults.standard.bool(forKey: Keys.autoRecordEnabled)
         let storedCountdown = UserDefaults.standard.integer(forKey: Keys.autoRecordCountdownSeconds)
         let allowed: Set<Int> = [3, 5, 10, 30]
@@ -308,6 +325,8 @@ final class AppPreferences: ObservableObject {
         static let meetingsFolder = "dev.fluke.meeting.meetingsFolder"
         static let identitySuggestionsEnabled = "dev.fluke.meeting.identitySuggestionsEnabled"
         static let identityMinSuggestScore = "dev.fluke.meeting.identityMinSuggestScore"
+        static let autoNameSpeakersEnabled = "dev.fluke.meeting.autoNameSpeakersEnabled"
+        static let autoNameThreshold = "dev.fluke.meeting.autoNameThreshold"
         static let autoRecordEnabled = "dev.fluke.meeting.autoRecordEnabled"
         static let autoRecordCountdownSeconds = "dev.fluke.meeting.autoRecordCountdownSeconds"
         static let autoRecordEnabledCalendarIDs = "dev.fluke.meeting.autoRecordEnabledCalendarIDs"

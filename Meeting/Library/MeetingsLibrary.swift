@@ -133,6 +133,10 @@ final class MeetingsLibrary: ObservableObject {
                     self.selection = nil
                 }
                 self.pruneExpiredVideos(in: sorted)
+                // One-time pass to auto-name the pre-fix historical library now
+                // that suggestions are freshly computed. Self-guards so it runs
+                // at most once ever (and no-ops on every later rescan).
+                self.backfillAutoNameIfNeeded()
             }
         }
     }
@@ -370,7 +374,45 @@ final class MeetingsLibrary: ObservableObject {
     /// User confirmed `speaker_N == identity X`. Updates speakers.json
     /// (displayName + identityID) and folds the speaker's embedding into the
     /// global identity centroid via running-mean weighted by sampleSeconds.
-    func applyIdentitySuggestion(_ suggestion: IdentitySuggestion, meeting: MeetingRecord.ID) {
+    /// True when a speaker's displayName is still a system default ("speaker_N",
+    /// "Speaker N", or "unknown") rather than a user- or auto-assigned name.
+    /// Mirrors the unmapped-speaker test in `loadRecord`.
+    nonisolated static func isDefaultSpeakerName(_ displayName: String) -> Bool {
+        let lower = displayName.lowercased()
+        let normalized = lower.replacingOccurrences(of: " ", with: "_")
+        return normalized.hasPrefix("speaker_") || lower == "unknown"
+    }
+
+    /// Pure selection: which suggestions should be auto-applied. Returns at most
+    /// one per speaker (the highest-scoring), keeping only those whose
+    /// `confidencePercent` ≥ `thresholdPercent` and whose speaker is still on a
+    /// default name with no identity yet. Empty when `enabled` is false.
+    nonisolated static func autoNameSelections(
+        suggestions: [IdentitySuggestion],
+        profiles: [SpeakerProfile],
+        enabled: Bool,
+        thresholdPercent: Int
+    ) -> [IdentitySuggestion] {
+        guard enabled else { return [] }
+        var bestBySpeaker: [SpeakerID: IdentitySuggestion] = [:]
+        for s in suggestions {
+            if let existing = bestBySpeaker[s.speakerID], existing.score >= s.score { continue }
+            bestBySpeaker[s.speakerID] = s
+        }
+        return bestBySpeaker.values
+            .filter { s in
+                guard s.confidencePercent >= thresholdPercent else { return false }
+                guard let p = profiles.first(where: { $0.id == s.speakerID }) else { return true }
+                return p.identityID == nil && isDefaultSpeakerName(p.displayName)
+            }
+            .sorted { $0.score > $1.score }
+    }
+
+    func applyIdentitySuggestion(
+        _ suggestion: IdentitySuggestion,
+        meeting: MeetingRecord.ID,
+        autoConfidence: Int? = nil
+    ) {
         guard let store = identityStore else { return }
         guard let m = meetings.first(where: { $0.id == meeting }) else { return }
         guard let embFile = try? MeetingEmbeddingsFile.read(from: m.folder),
@@ -392,6 +434,9 @@ final class MeetingsLibrary: ObservableObject {
             if profile.email == nil, let email = identity.emails.first {
                 profile.email = email
             }
+            // Tag (or clear) the auto-named marker. A manual accept passes nil,
+            // which clears any prior auto badge on re-confirm.
+            profile.autoNamedConfidence = autoConfidence
         }
         refreshMeeting(folder: m.folder)
     }
@@ -413,6 +458,106 @@ final class MeetingsLibrary: ObservableObject {
         ))
         try? embFile.write(to: m.folder)
         refreshMeeting(folder: m.folder)
+    }
+
+    /// Auto-apply high-confidence identity suggestions for one meeting. Called
+    /// once per meeting from the embedding-extraction completion hook, after a
+    /// rescan has populated `identitySuggestions`. Each applied name is tagged
+    /// with its confidence so the UI can badge and revert it. No-op when the
+    /// feature is off or nothing clears the threshold.
+    func autoNameSpeakers(folder: URL) {
+        let prefs = AppPreferences.shared
+        guard prefs.autoNameSpeakersEnabled else { return }
+        // Recompute this folder's `identitySuggestions` synchronously before
+        // reading them. The caller's `rescan()` is async (Task.detached), so on
+        // its own it has not yet repopulated suggestions by the time we get
+        // here — `refreshMeeting` reloads just this one folder on the MainActor
+        // via `loadRecord`, which computes suggestions inline. Without this the
+        // auto-name pass read empty suggestions and silently did nothing.
+        refreshMeeting(folder: folder)
+        guard let m = meetings.first(where: { $0.folder == folder }) else { return }
+        let thresholdPercent = Int(prefs.autoNameThreshold * 100)
+        let selections = Self.autoNameSelections(
+            suggestions: m.identitySuggestions,
+            profiles: m.speakerProfiles,
+            enabled: true,
+            thresholdPercent: thresholdPercent
+        )
+        applyAutoNameSelections(selections, meeting: m.id)
+    }
+
+    /// Auto-apply high-confidence names across every meeting currently loaded,
+    /// reusing the `identitySuggestions` the last rescan already computed (no
+    /// per-folder reload). Idempotent — `autoNameSelections` skips speakers
+    /// already named or below threshold. Used by the one-time historical
+    /// backfill; new meetings go through `autoNameSpeakers(folder:)` instead.
+    func autoNameAllLoadedMeetings() {
+        let prefs = AppPreferences.shared
+        guard prefs.autoNameSpeakersEnabled else { return }
+        let thresholdPercent = Int(prefs.autoNameThreshold * 100)
+        // Snapshot (meeting, selections) before applying — applying mutates
+        // `meetings`, but the per-meeting selections are value types so the
+        // snapshot stays valid through the loop.
+        let work: [(MeetingRecord.ID, [IdentitySuggestion])] = meetings.compactMap { m in
+            let selections = Self.autoNameSelections(
+                suggestions: m.identitySuggestions,
+                profiles: m.speakerProfiles,
+                enabled: true,
+                thresholdPercent: thresholdPercent
+            )
+            return selections.isEmpty ? nil : (m.id, selections)
+        }
+        for (meetingID, selections) in work {
+            applyAutoNameSelections(selections, meeting: meetingID)
+        }
+    }
+
+    /// One-time historical backfill. The auto-name feature shipped with a race
+    /// (the embedding-completion hook read suggestions before the async rescan
+    /// populated them), so no meeting recorded before the fix was ever
+    /// auto-named. This runs the pass once across the existing library, gated by
+    /// a persisted flag, and retries on later rescans until the data it needs
+    /// (loaded meetings + at least one saved identity) is actually available.
+    func backfillAutoNameIfNeeded() {
+        let key = "dev.fluke.meeting.didBackfillAutoNameV1"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        guard AppPreferences.shared.autoNameSpeakersEnabled else { return }
+        // Wait for the inputs the pass depends on; without these a rescan that
+        // landed before the identity store / scan finished would burn the flag
+        // on a no-op.
+        guard let store = identityStore, !store.identities.isEmpty, !meetings.isEmpty
+        else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        autoNameAllLoadedMeetings()
+    }
+
+    private func applyAutoNameSelections(_ selections: [IdentitySuggestion],
+                                         meeting: MeetingRecord.ID) {
+        for suggestion in selections {
+            applyIdentitySuggestion(suggestion, meeting: meeting,
+                                    autoConfidence: suggestion.confidencePercent)
+        }
+    }
+
+    /// Undo an auto-applied name: reset the speaker back to its default label,
+    /// drop the identity link + auto marker, so the suggestion chip reappears.
+    /// Does not un-merge the voice centroid that was folded into the identity
+    /// (same as renaming a speaker back by hand) — acceptable, and rare.
+    func revertAutoName(speakerID: SpeakerID, meeting: MeetingRecord.ID) {
+        let defaultName: String
+        if let idx = TranscriptMerger.diarizedIndex(speakerID) {
+            defaultName = "Speaker \(idx + 1)"
+        } else {
+            defaultName = speakerID.rawValue
+        }
+        updateSpeaker(meeting: meeting, speakerID: speakerID) { profile in
+            profile.displayName = defaultName
+            profile.identityID = nil
+            profile.email = nil
+            profile.attendeeId = nil
+            profile.role = nil
+            profile.autoNamedConfidence = nil
+        }
     }
 
     /// After the caller writes a speaker's displayName/email via `updateSpeaker`,

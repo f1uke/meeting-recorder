@@ -183,6 +183,21 @@ final class AppState: ObservableObject {
             }
         }
 
+        Task { [unowned self] in
+            await embeddingQueue.setOnMeetingEmbedded { folder in
+                Task { @MainActor [unowned self] in
+                    // Rescan to refresh the whole list now that embeddings
+                    // landed (suggestions can change for several meetings when
+                    // a centroid moves). `autoNameSpeakers` then auto-applies
+                    // the high-confidence names for this meeting — it
+                    // synchronously refreshes its own folder first, so it does
+                    // not depend on the async `rescan()` above having finished.
+                    self.library.rescan()
+                    self.library.autoNameSpeakers(folder: folder)
+                }
+            }
+        }
+
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.llmAvailability = await self.llm.availability()

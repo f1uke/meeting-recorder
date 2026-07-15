@@ -32,6 +32,15 @@ struct SpeakerProfile: Codable, Hashable, Sendable {
     /// `identities.json`. Set when the user confirms a suggestion or
     /// manually names a speaker; `nil` for un-mapped diarized speakers.
     var identityID: String?
+    /// Set when the auto-name pass applied this speaker's name automatically
+    /// (confidence ≥ the user's threshold). Holds the `confidencePercent` at
+    /// the moment of auto-apply so the UI can show "✨ auto NN%". `nil` for
+    /// manually-named or un-named speakers. Optional so old `speakers.json`
+    /// files (which lack the key) still decode via synthesized Codable.
+    var autoNamedConfidence: Int?
+
+    /// Convenience: this speaker's name was applied automatically, not by hand.
+    var autoNamed: Bool { autoNamedConfidence != nil }
 
     init(
         id: SpeakerID,
@@ -39,7 +48,8 @@ struct SpeakerProfile: Codable, Hashable, Sendable {
         attendeeId: String? = nil,
         email: String? = nil,
         role: String? = nil,
-        identityID: String? = nil
+        identityID: String? = nil,
+        autoNamedConfidence: Int? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -47,6 +57,7 @@ struct SpeakerProfile: Codable, Hashable, Sendable {
         self.email = email
         self.role = role
         self.identityID = identityID
+        self.autoNamedConfidence = autoNamedConfidence
     }
 
     /// Drop down to the lightweight `Speaker` value for places that

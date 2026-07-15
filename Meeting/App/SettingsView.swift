@@ -407,6 +407,42 @@ private struct IdentityMatchingSection: View {
                 .disabled(!prefs.identitySuggestionsEnabled)
             }
             Divider().opacity(0.4)
+            ToggleRow(
+                title: "Auto-name when confident",
+                description: "When a speaker's voice matches a known person above the threshold below, fill in their name automatically. Auto-named speakers show a ✨ badge and can be reverted.",
+                isOn: Binding(
+                    get: { prefs.autoNameSpeakersEnabled },
+                    set: { prefs.autoNameSpeakersEnabled = $0 }
+                )
+            )
+            .disabled(!prefs.identitySuggestionsEnabled)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Auto-name threshold")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Only auto-name at or above this confidence. Higher is safer.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textDim)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(Int(prefs.autoNameThreshold * 100))%")
+                        .font(.system(size: 12, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.textDim)
+                    Slider(
+                        value: Binding(
+                            get: { prefs.autoNameThreshold },
+                            set: { prefs.autoNameThreshold = $0 }
+                        ),
+                        in: 0.60...0.95,
+                        step: 0.05
+                    )
+                    .frame(width: 160)
+                }
+                .disabled(!prefs.identitySuggestionsEnabled || !prefs.autoNameSpeakersEnabled)
+            }
+            Divider().opacity(0.4)
             HStack {
                 Text("Stored identities: \(identityStore.identities.count)")
                     .font(.system(size: 13))
