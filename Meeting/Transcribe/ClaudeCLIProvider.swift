@@ -40,68 +40,45 @@ actor ClaudeCLIProvider: LLMProvider {
         // we actually need (`result`) is already in memory.
         Self.writeRunAudit(raw: raw, to: context.meetingFolder)
         let inner = try Self.parseClaudeOutput(raw)
-        let llmJSON = Self.stripJSONFences(inner)
 
-        struct Wire: Codable {
-            let tldr: String?
-            let summary: String
-            let goals: [String]?
-            let keyDecisions: [String]?
-            let actionItems: [WireItem]
-            let discussionTopics: [WireTopic]?
-            let references: [WireRef]?
-        }
-        struct WireItem: Codable {
-            let speaker: String
-            let text: String
-            let timestamp: String
-        }
-        struct WireTopic: Codable {
-            let heading: String
-            let bullets: [String]
-        }
-        struct WireRef: Codable {
-            let url: String
-            let label: String
-            let note: String?
-        }
-
-        guard let data = llmJSON.data(using: .utf8) else {
-            throw LLMError.decodeFailed("not utf-8")
-        }
-        let wire: Wire
+        // Happy path: the response contains a decodable JSON object,
+        // possibly wrapped in a ```json fence or prefixed with narration
+        // (which is common once Claude runs reference-fetch tools). The
+        // parser tolerates all of that.
         do {
-            wire = try JSONDecoder().decode(Wire.self, from: data)
-        } catch {
-            throw LLMError.decodeFailed(
-                "Expected JSON {tldr, summary, goals[], keyDecisions[], actionItems[], discussionTopics[]}: \(error.localizedDescription)\n\nRaw:\n\(llmJSON.prefix(800))"
+            return try SummaryResponseParser.decodeSummary(
+                from: inner,
+                providerName: name,
+                generatedAt: Date()
             )
-        }
-
-        return Summary(
-            summary: wire.summary,
-            actionItems: wire.actionItems.map { item in
-                ActionItem(speaker: item.speaker, text: item.text, timestamp: item.timestamp)
-            },
-            generatedAt: Date(),
-            providerName: name,
-            tldr: wire.tldr?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-            goals: wire.goals?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-            keyDecisions: wire.keyDecisions?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-            discussionTopics: wire.discussionTopics?.map {
-                DiscussionTopic(heading: $0.heading, bullets: $0.bullets)
-            },
-            references: wire.references?.compactMap { ref in
-                let label = ref.label.trimmingCharacters(in: .whitespacesAndNewlines)
-                let url = ref.url.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !label.isEmpty, !url.isEmpty else { return nil }
-                return Reference(
-                    url: url,
-                    label: label,
-                    note: ref.note?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        } catch {
+            // Repair path: the model drifted into a shape we can't decode
+            // (truncation, extra keys, JSON5-isms, an apology instead of
+            // JSON). Re-prompt it — cheaply, without re-sending the whole
+            // transcript — to reformat what it already produced into the
+            // strict contract. Handles future model drift without a code
+            // change. If repair also fails we surface the ORIGINAL output
+            // in the error so the UI shows what the model actually said.
+            let repairPrompt = Self.buildRepairPrompt(malformed: inner)
+            let repairedRaw = try await Self.runClaude(
+                at: claudePath,
+                input: repairPrompt,
+                workingDirectory: context.meetingFolder
+            )
+            Self.writeRunAudit(raw: repairedRaw, to: context.meetingFolder, filename: "summary_repair_run.json")
+            let repairedInner = try Self.parseClaudeOutput(repairedRaw)
+            do {
+                return try SummaryResponseParser.decodeSummary(
+                    from: repairedInner,
+                    providerName: name,
+                    generatedAt: Date()
+                )
+            } catch {
+                throw LLMError.decodeFailed(
+                    "Claude's summary wasn't valid JSON, and a reformat attempt also failed.\n\nWhat Claude returned:\n\(inner.trimmingCharacters(in: .whitespacesAndNewlines).prefix(800))"
                 )
             }
-        )
+        }
     }
 
     // MARK: - Helpers
@@ -523,8 +500,8 @@ actor ClaudeCLIProvider: LLMProvider {
     /// the raw stdout verbatim so a malformed envelope is still
     /// recoverable. All errors are swallowed — this is observability,
     /// not correctness.
-    private static func writeRunAudit(raw: String, to folder: URL) {
-        let url = folder.appendingPathComponent("summary_run.json")
+    private static func writeRunAudit(raw: String, to folder: URL, filename: String = "summary_run.json") {
+        let url = folder.appendingPathComponent(filename)
         if let data = raw.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: data),
            let pretty = try? JSONSerialization.data(
@@ -559,20 +536,32 @@ actor ClaudeCLIProvider: LLMProvider {
         return raw
     }
 
-    /// Some prompts make Claude wrap JSON in ```json fences despite the
-    /// instruction not to. Strip them defensively before decoding.
-    private static func stripJSONFences(_ s: String) -> String {
-        var trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("```") {
-            // Drop the first line (e.g. ```json) and the trailing fence.
-            if let firstNewline = trimmed.firstIndex(of: "\n") {
-                trimmed = String(trimmed[trimmed.index(after: firstNewline)...])
-            }
-            if let lastFence = trimmed.range(of: "```", options: .backwards) {
-                trimmed = String(trimmed[..<lastFence.lowerBound])
-            }
+    /// Repair prompt used when the first response can't be decoded even
+    /// after fence/prose tolerance (truncation, extra keys, an apology
+    /// instead of JSON). We hand the model back its own malformed output
+    /// and ask ONLY for a reformat — no transcript, so it's a cheap call —
+    /// giving us one self-heal attempt against model drift before we
+    /// surface a failure to the user.
+    private static func buildRepairPrompt(malformed: String) -> String {
+        return """
+        Your previous response was supposed to be a single JSON object with this exact shape, but it could not be parsed:
+
+        {
+          "tldr": "string",
+          "summary": "string",
+          "goals": ["string"],
+          "keyDecisions": ["string"],
+          "actionItems": [{"speaker": "string", "text": "string", "timestamp": "mm:ss"}],
+          "discussionTopics": [{"heading": "string", "bullets": ["string"]}],
+          "references": [{"url": "string", "label": "string", "note": "string"}]
         }
-        return trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        Reformat the content below into that exact JSON object. Preserve the language and meaning. Do not invent new content. Output ONLY the JSON object — no prose, no markdown fences, no explanation.
+
+        Previous response:
+
+        \(malformed)
+        """
     }
 
     private static func formatTimestamp(_ t: TimeInterval) -> String {
@@ -584,8 +573,4 @@ actor ClaudeCLIProvider: LLMProvider {
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%02d:%02d", m, s)
     }
-}
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
