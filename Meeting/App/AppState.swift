@@ -31,6 +31,11 @@ final class AppState: ObservableObject {
     let notifier: CalendarNotifier
     let autoRecord: AutoRecordScheduler
     private let countdownPanel: AutoRecordCountdownPanel
+    /// System-wide voice dictation: the double-tap-Ctrl hotkey tap, the
+    /// record/transcribe/inject state machine, and the floating HUD.
+    let dictation: DictationController
+    let dictationMonitor: DictationHotkeyMonitor
+    private let dictationHUD: DictationHUDPresenter
     @Published private(set) var permissions = PermissionStatus()
     @Published private(set) var llmAvailability: LLMAvailability = .unavailable("not yet checked")
     /// True while `EmbeddingExtractionQueue` has at least one job pending or
@@ -103,6 +108,17 @@ final class AppState: ObservableObject {
         self.picker = WindowPickerModel()
         self.calendar = CalendarStore()
         self.notifier = CalendarNotifier(calendar: calendar)
+
+        // Voice dictation. The controller is a @MainActor class (hence
+        // implicitly Sendable), so the hotkey monitor's @Sendable callbacks
+        // can capture it and hop back onto the MainActor to drive it.
+        let dictationController = DictationController()
+        self.dictation = dictationController
+        self.dictationHUD = DictationHUDPresenter(controller: dictationController)
+        self.dictationMonitor = DictationHotkeyMonitor(
+            onTrigger: { Task { @MainActor in dictationController.toggle() } },
+            onCancel: { Task { @MainActor in dictationController.cancel() } }
+        )
 
         let panel = AutoRecordCountdownPanel()
         self.countdownPanel = panel
@@ -277,6 +293,46 @@ final class AppState: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        // Dictation refuses to start while a meeting is being recorded
+        // (both drive an AVAudioEngine input tap).
+        dictation.recordingIsActive = { [weak self] in
+            self?.recording.isRecording ?? false
+        }
+
+        // Start / stop the dictation hotkey tap when the toggle flips or the
+        // Accessibility grant changes. dropFirst skips the construction-time
+        // publish; the initial start happens from AppDelegate after launch.
+        AppPreferences.shared.$dictationEnabled
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.syncDictationMonitor() }
+            }
+            .store(in: &cancellables)
+
+        $permissions
+            .map(\.accessibility)
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.syncDictationMonitor() }
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Start the dictation hotkey monitor when the feature is enabled and
+    /// Accessibility is granted; stop it otherwise. Idempotent - safe to
+    /// call on launch and on every relevant settings / permission change.
+    func syncDictationMonitor() {
+        let prefs = AppPreferences.shared
+        guard prefs.dictationEnabled, permissions.accessibility else {
+            if dictationMonitor.isRunning { dictationMonitor.stop() }
+            return
+        }
+        guard !dictationMonitor.isRunning else { return }
+        if !dictationMonitor.start() {
+            NSLog("[Meeting/Dictation] hotkey tap failed to start - Accessibility not granted yet?")
+        }
     }
 
     /// Hook for Settings change notifications. Each new transcription job

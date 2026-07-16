@@ -27,6 +27,7 @@ struct SettingsView: View {
                     case .general:       GeneralTab()
                     case .recording:     RecordingTab()
                     case .transcription: TranscriptionTab()
+                    case .dictation:     DictationTab()
                     case .permissions:   PermissionsTab()
                     case .calendar:      CalendarTab()
                     case .aiPrivacy:     ComingSoonTab(
@@ -76,13 +77,14 @@ struct SettingsView: View {
 // =============================================================================
 
 enum SettingsTab: Hashable, CaseIterable {
-    case general, recording, transcription, permissions, calendar, aiPrivacy, shortcuts, storage, about
+    case general, recording, transcription, dictation, permissions, calendar, aiPrivacy, shortcuts, storage, about
 
     var label: String {
         switch self {
         case .general:       "General"
         case .recording:     "Recording"
         case .transcription: "Transcription"
+        case .dictation:     "Dictation"
         case .permissions:   "Permissions"
         case .calendar:      "Calendar"
         case .aiPrivacy:     "AI & Privacy"
@@ -97,6 +99,7 @@ enum SettingsTab: Hashable, CaseIterable {
         case .general:       "house"
         case .recording:     "mic"
         case .transcription: "waveform"
+        case .dictation:     "text.cursor"
         case .permissions:   "lock.shield"
         case .calendar:      "calendar"
         case .aiPrivacy:     "sparkles"
@@ -109,7 +112,7 @@ enum SettingsTab: Hashable, CaseIterable {
     /// Display a NEW pill next to this tab's row in the sidebar.
     var isNew: Bool {
         switch self {
-        case .calendar, .permissions: true
+        case .calendar, .permissions, .dictation: true
         default: false
         }
     }
@@ -950,6 +953,91 @@ private struct ModelPickerRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+}
+
+// =============================================================================
+// MARK: - Dictation tab
+// =============================================================================
+
+private struct DictationTab: View {
+    @ObservedObject private var prefs = AppPreferences.shared
+    @EnvironmentObject private var appState: AppState
+
+    private var accessibilityGranted: Bool { appState.permissions.accessibility }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            DetailHeader(
+                title: "Dictation",
+                subtitle: "Talk instead of type anywhere in macOS. Double-tap Ctrl, speak, and the text is inserted at your cursor in the frontmost app."
+            )
+
+            SettingsSection(label: "Voice dictation") {
+                ToggleRow(
+                    title: "Enable system-wide dictation",
+                    description: "Double-tap Ctrl to start and stop. It also stops after a short silence. Press Esc to cancel.",
+                    isOn: Binding(
+                        get: { prefs.dictationEnabled },
+                        set: { prefs.dictationEnabled = $0 }
+                    )
+                )
+                if prefs.dictationEnabled && !accessibilityGranted {
+                    Divider().opacity(0.4)
+                    InlineNote(
+                        text: "Dictation needs Accessibility access to detect the hotkey and paste into other apps. Grant it below.",
+                        tone: .warning
+                    )
+                }
+            }
+
+            SettingsSection(label: "Accessibility access") {
+                PermissionSettingRow(
+                    permission: .accessibility,
+                    extraNote: "One grant covers both detecting the double-tap Ctrl hotkey and inserting the transcribed text into whatever app has focus."
+                )
+            }
+
+            SettingsSection(label: "Transcription engine") {
+                MenuRow(
+                    title: "Engine",
+                    description: engineDescription,
+                    selection: Binding(
+                        get: { prefs.dictationEngine },
+                        set: { prefs.dictationEngine = $0 }
+                    ),
+                    options: DictationEngine.allCases,
+                    label: \.displayName
+                )
+                .disabled(!prefs.dictationEnabled)
+
+                if prefs.dictationEngine == .gemini && prefs.geminiAPIKey.isEmpty {
+                    Divider().opacity(0.4)
+                    InlineNote(
+                        text: "No Gemini API key is set (Transcription tab). Dictation will fall back to the local model until you add one.",
+                        tone: .info
+                    )
+                }
+            }
+
+            SettingsSection(label: "Language") {
+                MenuRow(
+                    title: "Dictation language",
+                    description: "Force this language for dictation. Thai keeps Thai script for Thai-English code-switching.",
+                    selection: Binding(
+                        get: { prefs.dictationLanguage },
+                        set: { prefs.dictationLanguage = $0 }
+                    ),
+                    options: TranscriptionLanguage.allCases,
+                    label: \.displayName
+                )
+                .disabled(!prefs.dictationEnabled)
+            }
+        }
+    }
+
+    private var engineDescription: String {
+        prefs.dictationEngine.description
     }
 }
 

@@ -201,6 +201,28 @@ final class AppPreferences: ObservableObject {
         didSet { UserDefaults.standard.set(videoRetention.rawValue, forKey: Keys.videoRetention) }
     }
 
+    /// Master toggle for system-wide voice dictation (double-tap Ctrl to
+    /// dictate into the frontmost app). Off by default - the feature needs
+    /// the Accessibility TCC grant, so users opt in explicitly. When on but
+    /// Accessibility is missing, the hotkey monitor simply never starts.
+    @Published var dictationEnabled: Bool {
+        didSet { UserDefaults.standard.set(dictationEnabled, forKey: Keys.dictationEnabled) }
+    }
+
+    /// Which backend transcribes a dictation utterance. Independent of the
+    /// meeting `transcriptionEngine`. Defaults to Gemini 2.5 Pro (highest
+    /// quality on Thai-English); falls back to local automatically when no
+    /// Gemini key is configured.
+    @Published var dictationEngine: DictationEngine {
+        didSet { UserDefaults.standard.set(dictationEngine.rawValue, forKey: Keys.dictationEngine) }
+    }
+
+    /// Forced language for dictation transcription. Defaults to Thai (same
+    /// as meetings) so Thai-English code-switching keeps Thai script.
+    @Published var dictationLanguage: TranscriptionLanguage {
+        didSet { UserDefaults.standard.set(dictationLanguage.rawValue, forKey: Keys.dictationLanguage) }
+    }
+
     private init() {
         self.micDeviceUID = UserDefaults.standard.string(forKey: Keys.micDeviceUID)
         self.modelVariant = ModelVariant(
@@ -271,6 +293,13 @@ final class AppPreferences: ObservableObject {
         self.videoRetention = VideoRetention(
             rawValue: UserDefaults.standard.string(forKey: Keys.videoRetention) ?? ""
         ) ?? .keepForever
+        self.dictationEnabled = UserDefaults.standard.bool(forKey: Keys.dictationEnabled)
+        self.dictationEngine = DictationEngine(
+            rawValue: UserDefaults.standard.string(forKey: Keys.dictationEngine) ?? ""
+        ) ?? .gemini
+        self.dictationLanguage = TranscriptionLanguage(
+            rawValue: UserDefaults.standard.string(forKey: Keys.dictationLanguage) ?? ""
+        ) ?? .thai
         // Don't call `appearance.apply()` here: AppPreferences.shared is
         // first touched during MeetingApp.init / AppState.init, which
         // runs *before* NSApplication is fully online — `NSApp` is still
@@ -332,6 +361,9 @@ final class AppPreferences: ObservableObject {
         static let autoRecordEnabledCalendarIDs = "dev.fluke.meeting.autoRecordEnabledCalendarIDs"
         static let autoRecordSourceFallback = "dev.fluke.meeting.autoRecordSourceFallback"
         static let videoRetention = "dev.fluke.meeting.videoRetention"
+        static let dictationEnabled = "dev.fluke.meeting.dictationEnabled"
+        static let dictationEngine = "dev.fluke.meeting.dictationEngine"
+        static let dictationLanguage = "dev.fluke.meeting.dictationLanguage"
     }
 }
 

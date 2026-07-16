@@ -50,6 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if let state = AppDelegate.pendingState {
             attach(state: state)
             AppDelegate.pendingState = nil
+            // Refresh permissions once at launch so the dictation hotkey tap
+            // can start if the feature is enabled and Accessibility is
+            // already granted. The permissions publisher then keeps the
+            // monitor in sync on any later change.
+            Task { @MainActor in
+                await state.refreshPermissions()
+                state.syncDictationMonitor()
+            }
         }
     }
 
