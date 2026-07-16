@@ -330,7 +330,9 @@ final class AppState: ObservableObject {
             return
         }
         guard !dictationMonitor.isRunning else { return }
-        if !dictationMonitor.start() {
+        if dictationMonitor.start() {
+            NSLog("[Meeting/Dictation] hotkey tap running - double-tap Ctrl to dictate")
+        } else {
             NSLog("[Meeting/Dictation] hotkey tap failed to start - Accessibility not granted yet?")
         }
     }

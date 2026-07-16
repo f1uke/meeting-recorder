@@ -25,6 +25,10 @@ actor GeminiProvider: TranscriptionProvider {
     private let glossary: String
     private let modelName: String
     private let useBatchAPI: Bool
+    /// When false, this provider never runs local SpeakerKit diarization even
+    /// if a stream asks for it - the single-speaker dictation path uses this
+    /// so it stays Gemini-only (no diarization latency / failure surface).
+    private let diarizationEnabled: Bool
 
     private let urlSession: URLSession
 
@@ -35,14 +39,17 @@ actor GeminiProvider: TranscriptionProvider {
         apiKey: String,
         glossary: String,
         modelName: String = "gemini-2.5-flash",
-        useBatchAPI: Bool = false
+        useBatchAPI: Bool = false,
+        diarizationEnabled: Bool = true
     ) {
         self.apiKey = apiKey
         self.glossary = glossary
         self.modelName = modelName
         self.useBatchAPI = useBatchAPI
+        self.diarizationEnabled = diarizationEnabled
         let suffix = useBatchAPI ? " (batch)" : ""
-        self.name = "Gemini (\(modelName))\(suffix) + SpeakerKit"
+        let diar = diarizationEnabled ? " + SpeakerKit" : ""
+        self.name = "Gemini (\(modelName))\(suffix)\(diar)"
 
         let config = URLSessionConfiguration.default
         // Long uploads + long generateContent calls. The default 60s timeout
@@ -70,9 +77,13 @@ actor GeminiProvider: TranscriptionProvider {
             throw TranscriptionError.audioMissing(audioURL)
         }
 
+        // Diarization only runs when the stream asks for it AND this provider
+        // was built with it enabled (dictation disables it - single speaker).
+        let willDiarize = options.withDiarization && diarizationEnabled
+
         // Generate band: how much of total progress is owned by upload+
         // generateContent (the rest is diarization, when applicable).
-        let generateEnd = options.withDiarization ? 0.70 : 1.0
+        let generateEnd = willDiarize ? 0.70 : 1.0
         progress?(0)
 
         // Chunk the audio at 60 s boundaries before sending to Gemini.
@@ -129,7 +140,7 @@ actor GeminiProvider: TranscriptionProvider {
         let totalDuration = cloudSegments.last.map { TimeInterval($0.end) } ?? 0
         let language = cloudSegments.first?.language ?? options.language
 
-        if options.withDiarization {
+        if willDiarize {
             let timeline = try await runDiarization(
                 audioURL: audioURL,
                 expectedSpeakerCount: options.expectedSpeakerCount

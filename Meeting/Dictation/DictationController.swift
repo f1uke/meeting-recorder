@@ -89,7 +89,6 @@ final class DictationController: ObservableObject {
         silenceTimer?.invalidate(); silenceTimer = nil
 
         let rec = recorder
-        Task.detached(priority: .userInitiated) { rec?.stop() }
         recorder = nil
         state = .transcribing
 
@@ -106,6 +105,14 @@ final class DictationController: ObservableObject {
         let language = prefs.dictationLanguage.whisperCode
 
         Task {
+            // Finalize the recording BEFORE reading it. MicRecorder.stop()
+            // releases the AVAudioFile, which flushes the AAC encoder and
+            // writes the m4a moov atom; only then is the file decodable.
+            // Reading it before finalize fails to open (ExtAudioFileOpenURL
+            // error) and surfaces as a provider failure. stop() can block a
+            // few ms, so run it off the main actor but AWAIT completion so
+            // the transcribe read never races the write.
+            await Self.finalizeRecording(rec)
             do {
                 let made = DictationProviderFactory.make(config: config)
                 let result = try await made.provider.transcribe(
@@ -124,18 +131,43 @@ final class DictationController: ObservableObject {
                 let text = TextInjector.joinSegments(result.segments)
                 cleanupTemp()
                 if text.isEmpty {
+                    NSLog("[Meeting/Dictation] transcribe returned no text (0 usable segments)")
                     state = .failed("Didn't catch that")
                     autoReset(after: 1.8)
                 } else {
+                    NSLog("[Meeting/Dictation] injecting %d chars", text.count)
                     TextInjector.inject(text)
                     state = .injected(text)
                     autoReset(after: 1.2)
                 }
             } catch {
                 cleanupTemp()
-                state = .failed(error.localizedDescription)
+                let message = Self.humanMessage(for: error)
+                NSLog("[Meeting/Dictation] transcribe failed: %@", message)
+                state = .failed(message)
                 autoReset(after: 3.0)
             }
+        }
+    }
+
+    /// Stop + finalize the recorder off the main actor and await completion.
+    /// `MicRecorder` is `Sendable`, so it is safe to hand to a detached task.
+    private static func finalizeRecording(_ rec: MicRecorder?) async {
+        await Task.detached(priority: .userInitiated) { rec?.stop() }.value
+    }
+
+    /// Concise, human-readable HUD copy for a transcribe failure. Strips the
+    /// meeting-oriented "Provider ... ผิดพลาด:" wrapper so the HUD shows just
+    /// the underlying cause (e.g. a network error) instead of a truncated,
+    /// diarization-flavoured prefix.
+    nonisolated static func humanMessage(for error: Error) -> String {
+        switch error {
+        case TranscriptionError.providerFailed(_, let underlying):
+            return underlying.localizedDescription
+        case TranscriptionError.modelLoadFailed(let message):
+            return message
+        default:
+            return error.localizedDescription
         }
     }
 
