@@ -46,11 +46,15 @@ enum DictationProviderFactory {
     static func make(config: DictationProviderConfig) -> (provider: TranscriptionProvider, engineDidFallBack: Bool) {
         switch config.engine {
         case .gemini where !config.geminiKey.isEmpty:
+            // Dictation is a single speaker (the user): keep it Gemini-only
+            // with no diarization, which removes SpeakerKit latency and its
+            // failure surface on short mono mic clips.
             let p = GeminiProvider(
                 apiKey: config.geminiKey,
                 glossary: config.glossary,
                 modelName: config.geminiModel,
-                useBatchAPI: false
+                useBatchAPI: false,
+                diarizationEnabled: false
             )
             return (p, false)
         case .gemini:
